@@ -1,0 +1,80 @@
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: {{.name}}-{{.Replica}}
+  labels:
+    app: {{.name}}-{{.Replica}}
+    migration.forklift.konveyor.io/eligible: "true"
+    vm-os: {{.osLabel}}
+    vm-size: {{.sizeLabel}}
+spec:
+  running: true
+  dataVolumeTemplates:
+    - metadata:
+        name: {{.name}}-{{.Replica}}-data-volume
+      spec:
+        pvc:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: {{.storageSize}}
+          storageClassName: {{.storageClassName}}
+        source:
+          blank: {}
+  template:
+    metadata:
+      labels:
+        kubevirt.io/vm: {{.name}}-{{.Replica}}
+        app: {{.name}}-{{.Replica}}
+        vm-name: {{.name}}-{{.Replica}}
+    spec:
+      domain:
+        cpu:
+          cores: {{.cpuCores}}
+        devices:
+          disks:
+            - disk:
+                bus: virtio
+              name: containerdisk
+            - disk:
+                bus: virtio
+              name: cloudinitdisk
+            - disk:
+                bus: virtio
+              name: datadisk
+          interfaces:
+            - name: default
+              masquerade: {}
+        resources:
+          requests:
+            memory: {{.memory}}
+      networks:
+        - name: default
+          pod: {}
+      volumes:
+        - name: containerdisk
+          containerDisk:
+            image: {{.image}}
+        - name: cloudinitdisk
+          cloudInitNoCloud:
+            userData: |
+              #cloud-config
+              user: {{.user}}
+              password: {{.password}}
+              chpasswd:
+                expire: false
+              ssh_authorized_keys:
+                - {{.sshPublicKey}}
+              mounts:
+                - [/dev/vdc, /data, auto, "defaults,nofail", "0", "2"]
+              runcmd:
+                - mkdir -p /data
+                - |
+                  if ! blkid /dev/vdc | grep -q TYPE; then
+                    mkfs.xfs -L data /dev/vdc
+                  fi
+                - mount -a
+        - name: datadisk
+          dataVolume:
+            name: {{.name}}-{{.Replica}}-data-volume

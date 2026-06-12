@@ -1,0 +1,90 @@
+# vmshift-validator configuration
+#
+# Copy this file to config.yaml and fill in your environment-specific values:
+#   cp config.example.yaml config.yaml
+#
+# config.yaml is gitignored — your secrets and cluster details stay local.
+# Variables here map 1:1 to Makefile variables (snake_case → UPPER_SNAKE_CASE).
+# Command-line overrides still win:  make density-setup NAMESPACE=my-ns
+
+# ── Cluster authentication ───────────────────────────────────────
+
+# Path to the source (blue) cluster kubeconfig.
+source_kubeconfig: config/source-cluster/auth/kubeconfig
+
+# Path to the target (green) cluster kubeconfig.
+target_kubeconfig: config/target-cluster/auth/kubeconfig
+
+# ── VM / namespace settings ──────────────────────────────────────
+
+# Kubernetes namespace for VM creation and migration.
+namespace: vm-services
+
+# Path to SSH private key for VM access (public key auto-derived as <path>.pub).
+ssh_key: keys/kube-burner
+
+# Guest OS username matching the cloud-init user in kube-burner templates.
+ssh_user: fedora
+
+# Guest OS password set via cloud-init (used for console; SSH uses key pair).
+vm_password: fedora
+
+# Container disk image for VM boot disk (vm-services profile only).
+container_image: quay.io/containerdisks/fedora:41
+
+# Kubernetes node to pin VMs to via nodeSelector. Leave empty for scheduler placement.
+target_node: ""
+
+# Label selector for discovering kube-burner VMs.
+vm_label_selector: workload-type=services-test
+
+# ── kube-burner settings ────────────────────────────────────────
+
+# Job config filename inside kube-burner/. Use kubevirt-density.yml for multi-OS.
+kube_burner_config: vm-services.yml
+
+# ── Forklift / MTV settings ─────────────────────────────────────
+
+# Namespace where Forklift operator resources live.
+mtv_namespace: openshift-mtv
+
+# Forklift Provider CR name for the source cluster.
+provider_source_name: host
+
+# Forklift Provider CR name for the target cluster.
+provider_dest_name: green-cluster
+
+# Forklift NetworkMap CR name.
+network_map_name: blue-green-network-map
+
+# Forklift StorageMap CR name.
+storage_map_name: blue-green-storage-map
+
+# Execution profile: "gcp" (direct kubeconfig) or "baremetal-l2" (SSH bastions).
+migration_profile: gcp
+
+# StorageClass for VM data volumes created by kube-burner.
+storage_class: standard-csi
+
+# ── Timeouts and tuning ─────────────────────────────────────────
+
+# Logging verbosity (1=info, 2=verbose, 3=debug).
+log_level: 1
+
+# Seconds to wait after kube-burner completes before verifying workloads.
+stabilize_wait: 30
+
+# Max seconds to wait for guest SSH on the source cluster.
+ssh_ready_timeout: 600
+
+# Max seconds to wait for guest SSH on the target cluster after migration.
+post_ssh_ready_timeout: 225
+
+# Extra options passed to virtctl ssh --local-ssh-opts.
+local_ssh_opts: ""
+
+# Max polling iterations for Forklift Migration completion.
+migration_max_attempts: 60
+
+# Seconds between Forklift Migration status polls.
+migration_poll_interval: 10

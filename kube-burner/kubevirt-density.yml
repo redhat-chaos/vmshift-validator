@@ -1,0 +1,133 @@
+global:
+  measurements:
+  - name: vmiLatency
+
+jobs:
+  - name: kubevirt-density
+    jobType: create
+    jobIterations: 1
+    qps: 20
+    burst: 20
+    namespacedIterations: false
+    namespace: kubevirt-density
+    verifyObjects: true
+    errorOnVerify: true
+    jobIterationDelay: 1s
+    waitWhenFinished: true
+    podWait: false
+    maxWaitTimeout: 1h
+    jobPause: 5m
+    cleanup: true
+    objects:
+
+    # Small CentOS x2
+    - objectTemplate: templates/vm-ephemeral.yml
+      replicas: 2
+      inputVars:
+        name: vm-small-centos
+        image: quay.io/containerdisks/centos-stream:9
+        user: centos
+        password: centos
+        osLabel: centos
+        sizeLabel: small
+        cpuCores: 1
+        memory: 1Gi
+        storageSize: 5Gi
+        storageClassName: REPLACE_STORAGE_CLASS
+        sshPublicKey: REPLACE_SSH_PUBLIC_KEY
+
+    # Small Fedora x1
+    - objectTemplate: templates/vm-ephemeral.yml
+      replicas: 1
+      inputVars:
+        name: vm-small-fedora
+        image: quay.io/containerdisks/fedora:41
+        user: fedora
+        password: fedora
+        osLabel: fedora
+        sizeLabel: small
+        cpuCores: 1
+        memory: 1Gi
+        storageSize: 5Gi
+        storageClassName: REPLACE_STORAGE_CLASS
+        sshPublicKey: REPLACE_SSH_PUBLIC_KEY
+
+    # Small Ubuntu x1
+    - objectTemplate: templates/vm-ephemeral.yml
+      replicas: 1
+      inputVars:
+        name: vm-small-ubuntu
+        image: quay.io/containerdisks/ubuntu:24.04
+        user: ubuntu
+        password: ubuntu
+        osLabel: ubuntu
+        sizeLabel: small
+        cpuCores: 1
+        memory: 1Gi
+        storageSize: 5Gi
+        storageClassName: REPLACE_STORAGE_CLASS
+        sshPublicKey: REPLACE_SSH_PUBLIC_KEY
+
+    # Medium CentOS x1
+    - objectTemplate: templates/vm-ephemeral.yml
+      replicas: 1
+      inputVars:
+        name: vm-medium-centos
+        image: quay.io/containerdisks/centos-stream:9
+        user: centos
+        password: centos
+        osLabel: centos
+        sizeLabel: medium
+        cpuCores: 2
+        memory: 2Gi
+        storageSize: 10Gi
+        storageClassName: REPLACE_STORAGE_CLASS
+        sshPublicKey: REPLACE_SSH_PUBLIC_KEY
+
+    # Medium Fedora x1
+    - objectTemplate: templates/vm-ephemeral.yml
+      replicas: 1
+      inputVars:
+        name: vm-medium-fedora
+        image: quay.io/containerdisks/fedora:41
+        user: fedora
+        password: fedora
+        osLabel: fedora
+        sizeLabel: medium
+        cpuCores: 2
+        memory: 2Gi
+        storageSize: 10Gi
+        storageClassName: REPLACE_STORAGE_CLASS
+        sshPublicKey: REPLACE_SSH_PUBLIC_KEY
+
+    # Medium Ubuntu x1
+    - objectTemplate: templates/vm-ephemeral.yml
+      replicas: 1
+      inputVars:
+        name: vm-medium-ubuntu
+        image: quay.io/containerdisks/ubuntu:24.04
+        user: ubuntu
+        password: ubuntu
+        osLabel: ubuntu
+        sizeLabel: medium
+        cpuCores: 2
+        memory: 2Gi
+        storageSize: 10Gi
+        storageClassName: REPLACE_STORAGE_CLASS
+        sshPublicKey: REPLACE_SSH_PUBLIC_KEY
+
+    # Large Fedora x1
+    - objectTemplate: templates/vm-ephemeral.yml
+      replicas: 1
+      inputVars:
+        name: vm-large-fedora
+        image: quay.io/containerdisks/fedora:41
+        user: fedora
+        password: fedora
+        osLabel: fedora
+        sizeLabel: large
+        cpuCores: 2
+        memory: 4Gi
+        storageSize: 20Gi
+        storageClassName: REPLACE_STORAGE_CLASS
+        sshPublicKey: REPLACE_SSH_PUBLIC_KEY

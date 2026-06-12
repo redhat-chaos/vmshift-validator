@@ -1,0 +1,70 @@
+# Reports & generated output
+reports/*
+!reports/.gitkeep
+scripts/generated/
+
+# User config (generated from config.example.yaml via make init-config)
+config.yaml
+.config.mk
+
+# Rendered kube-burner configs (generated from templates by make render-config)
+kube-burner/.rendered-*.yml
+
+# Logs
+*.log
+
+# SSH keys (users must generate their own)
+keys/*
+!keys/.gitkeep
+
+# Cluster kubeconfigs
+config/source-cluster/auth/kubeconfig
+config/target-cluster/auth/kubeconfig
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+.env
+.env.*
+dist/
+build/
+*.egg-info/
+
+# Testing
+.coverage
+htmlcov/
+.pytest_cache/
+
+# IDE
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Secrets & credentials
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+secrets/
+credentials/
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+
+# Kubernetes
+kubeconfig*
+*.kubeconfig
+
+# Misc
+tmp/
+temp/

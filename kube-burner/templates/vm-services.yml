@@ -1,0 +1,197 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{.name}}-{{.Replica}}-userdata
+  labels:
+    app: {{.name}}-{{.Replica}}
+    workload-type: services-test
+type: Opaque
+stringData:
+  userdata: |
+    #cloud-config
+    user: {{.user}}
+    password: {{.password}}
+    chpasswd:
+      expire: false
+    ssh_authorized_keys:
+      - {{.sshPublicKey}}
+    packages:
+      - sqlite
+      - python3
+      - cronie
+    mounts:
+      - [/dev/vdc, /data, auto, "defaults,nofail", "0", "2"]
+    write_files:
+      - path: /etc/systemd/system/file-writer.service
+        content: |
+          [Unit]
+          Description=Persistent file writer
+          After=local-fs.target
+          [Service]
+          Type=simple
+          ExecStart=/bin/bash -c 'mkdir -p /data/test && while true; do echo "$(date +%%Y-%%m-%%dT%%H:%%M:%%S) - writing test data" >> /data/test/log.txt; sleep 1; done'
+          Restart=always
+          RestartSec=3
+          [Install]
+          WantedBy=multi-user.target
+      - path: /etc/systemd/system/http-server.service
+        content: |
+          [Unit]
+          Description=HTTP server on port 8080
+          After=network-online.target local-fs.target
+          Wants=network-online.target
+          [Service]
+          Type=simple
+          WorkingDirectory=/data
+          ExecStart=/usr/bin/python3 -m http.server 8080
+          Restart=always
+          RestartSec=3
+          [Install]
+          WantedBy=multi-user.target
+      - path: /usr/local/bin/sqlite-writer.sh
+        permissions: '0755'
+        content: |
+          #!/bin/bash
+          DB=/data/test.db
+          sqlite3 "$DB" "CREATE TABLE IF NOT EXISTS test (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp INTEGER NOT NULL, written_at TEXT NOT NULL);"
+          while true; do
+            sqlite3 "$DB" "INSERT INTO test (timestamp, written_at) VALUES ($(date +%s), '$(date +%Y-%m-%dT%H:%M:%S)');"
+            sleep 2
+          done
+      - path: /etc/systemd/system/sqlite-writer.service
+        content: |
+          [Unit]
+          Description=SQLite writer to /data/test.db
+          After=local-fs.target
+          [Service]
+          Type=simple
+          ExecStart=/usr/local/bin/sqlite-writer.sh
+          Restart=always
+          RestartSec=3
+          [Install]
+          WantedBy=multi-user.target
+      - path: /etc/cron.d/test-cron
+        content: |
+          * * * * * root mkdir -p /data/test && echo "cron ran at $(date +\%Y-\%m-\%dT\%H:\%M:\%S)" >> /data/test/cron.log
+      - path: /etc/systemd/system/file-writer-ephemeral.service
+        content: |
+          [Unit]
+          Description=Ephemeral file writer
+          After=local-fs.target
+          [Service]
+          Type=simple
+          ExecStart=/bin/bash -c 'mkdir -p /var/lib/test-ephemeral && while true; do echo "$(date +%%Y-%%m-%%dT%%H:%%M:%%S) - writing ephemeral data" >> /var/lib/test-ephemeral/log.txt; sleep 1; done'
+          Restart=always
+          RestartSec=3
+          [Install]
+          WantedBy=multi-user.target
+      - path: /usr/local/bin/sqlite-writer-ephemeral.sh
+        permissions: '0755'
+        content: |
+          #!/bin/bash
+          DB=/var/lib/test-ephemeral/test.db
+          mkdir -p /var/lib/test-ephemeral
+          sqlite3 "$DB" "CREATE TABLE IF NOT EXISTS test (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp INTEGER NOT NULL, written_at TEXT NOT NULL);"
+          while true; do
+            sqlite3 "$DB" "INSERT INTO test (timestamp, written_at) VALUES ($(date +%s), '$(date +%Y-%m-%dT%H:%M:%S)');"
+            sleep 2
+          done
+      - path: /etc/systemd/system/sqlite-writer-ephemeral.service
+        content: |
+          [Unit]
+          Description=Ephemeral SQLite writer
+          [Service]
+          Type=simple
+          ExecStart=/usr/local/bin/sqlite-writer-ephemeral.sh
+          Restart=always
+          RestartSec=3
+          [Install]
+          WantedBy=multi-user.target
+    runcmd:
+      - mkdir -p /data
+      - |
+        if ! blkid /dev/vdc | grep -q TYPE; then
+          mkfs.xfs -L data /dev/vdc
+        fi
+      - mount -a
+      - mkdir -p /data/test
+      - mkdir -p /var/lib/test-ephemeral
+      - systemctl daemon-reload
+      - systemctl enable --now file-writer.service
+      - systemctl enable --now http-server.service
+      - systemctl enable --now sqlite-writer.service
+      - systemctl enable --now crond
+      - systemctl enable --now file-writer-ephemeral.service
+      - systemctl enable --now sqlite-writer-ephemeral.service
+---
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: {{.name}}-{{.Replica}}
+  labels:
+    app: {{.name}}-{{.Replica}}
+    migration.forklift.konveyor.io/eligible: "true"
+    vm-os: {{.osLabel}}
+    vm-size: {{.sizeLabel}}
+    workload-type: services-test
+spec:
+  runStrategy: Always
+  dataVolumeTemplates:
+    - metadata:
+        name: {{.name}}-{{.Replica}}-data-volume
+      spec:
+        pvc:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: {{.storageSize}}
+          storageClassName: {{.storageClassName}}
+        source:
+          blank: {}
+  template:
+    metadata:
+      labels:
+        kubevirt.io/vm: {{.name}}-{{.Replica}}
+        app: {{.name}}-{{.Replica}}
+        vm-name: {{.name}}-{{.Replica}}
+        workload-type: services-test
+    spec:
+      domain:
+        cpu:
+          cores: {{.cpuCores}}
+        devices:
+          disks:
+            - disk:
+                bus: virtio
+              name: containerdisk
+            - disk:
+                bus: virtio
+              name: cloudinitdisk
+            - disk:
+                bus: virtio
+              name: datadisk
+          interfaces:
+            - name: default
+              masquerade: {}
+        resources:
+          requests:
+            memory: {{.memory}}
+      {{- if .targetNode }}
+      nodeSelector:
+        kubernetes.io/hostname: {{.targetNode}}
+      {{- end }}
+      networks:
+        - name: default
+          pod: {}
+      volumes:
+        - name: containerdisk
+          containerDisk:
+            image: {{.image}}
+        - name: cloudinitdisk
+          cloudInitNoCloud:
+            secretRef:
+              name: {{.name}}-{{.Replica}}-userdata
+        - name: datadisk
+          dataVolume:
+            name: {{.name}}-{{.Replica}}-data-volume

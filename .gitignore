@@ -42,6 +42,7 @@ htmlcov/
 # IDE
 .vscode/
 .idea/
+.serena/
 
 # OS files
 .DS_Store
@@ -64,6 +65,9 @@ credentials/
 # Kubernetes
 kubeconfig*
 *.kubeconfig
+
+# Environment profiles (contain internal infra details)
+profiles/
 
 # Misc
 tmp/

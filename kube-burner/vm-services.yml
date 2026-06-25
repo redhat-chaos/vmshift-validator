@@ -20,45 +20,11 @@ jobs:
     cleanup: true
     objects:
 
-    # Worker A: 1 VM
+    # 5 small Fedora VMs spread by scheduler
     - objectTemplate: templates/vm-services.yml
-      replicas: 1
+      replicas: 5
       inputVars:
-        name: vm-svc-worker-a
-        image: REPLACE_CONTAINER_IMAGE
-        user: REPLACE_SSH_USER
-        password: REPLACE_VM_PASSWORD
-        osLabel: fedora
-        sizeLabel: small
-        cpuCores: 1
-        memory: 512Mi
-        storageSize: 5Gi
-        storageClassName: REPLACE_STORAGE_CLASS
-        sshPublicKey: REPLACE_SSH_PUBLIC_KEY
-        targetNode: "REPLACE_TARGET_NODE"
-
-    # Worker B: 1 VM
-    - objectTemplate: templates/vm-services.yml
-      replicas: 1
-      inputVars:
-        name: vm-svc-worker-b
-        image: REPLACE_CONTAINER_IMAGE
-        user: REPLACE_SSH_USER
-        password: REPLACE_VM_PASSWORD
-        osLabel: fedora
-        sizeLabel: small
-        cpuCores: 1
-        memory: 512Mi
-        storageSize: 5Gi
-        storageClassName: REPLACE_STORAGE_CLASS
-        sshPublicKey: REPLACE_SSH_PUBLIC_KEY
-        targetNode: "REPLACE_TARGET_NODE"
-
-    # Worker C: 1 VM
-    - objectTemplate: templates/vm-services.yml
-      replicas: 1
-      inputVars:
-        name: vm-svc-worker-c
+        name: vm-svc
         image: REPLACE_CONTAINER_IMAGE
         user: REPLACE_SSH_USER
         password: REPLACE_VM_PASSWORD

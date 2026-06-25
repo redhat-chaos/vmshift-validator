@@ -19,6 +19,7 @@ Optional:
   --provider-dest      Destination provider name (default: green-cluster)
   --network-map        NetworkMap name (default: blue-green-network-map)
   --storage-map        StorageMap name (default: blue-green-storage-map)
+  --migration-profile P Migration profile (default: gcp)
   --plan-only          Apply the Plan but do not trigger the Migration
   --dry-run            Render manifests but do not apply
 
@@ -34,6 +35,7 @@ TEMPLATE_DIR=""
 OUTPUT_DIR=""
 PLAN_ONLY=false
 DRY_RUN=false
+MIGRATION_PROFILE="${MIGRATION_PROFILE:-gcp}"
 PROVIDER_SOURCE="${PROVIDER_SOURCE_NAME:-host}"
 PROVIDER_DEST="${PROVIDER_DEST_NAME:-green-cluster}"
 NETWORK_MAP="${NETWORK_MAP_NAME:-blue-green-network-map}"
@@ -51,6 +53,7 @@ while [[ $# -gt 0 ]]; do
     --network-map)      NETWORK_MAP="$2"; shift 2 ;;
     --storage-map)      STORAGE_MAP="$2"; shift 2 ;;
     --mtv-namespace)    MTV_NAMESPACE="$2"; shift 2 ;;
+    --migration-profile) MIGRATION_PROFILE="$2"; shift 2 ;;
     --plan-only)        PLAN_ONLY=true; shift ;;
     --dry-run)          DRY_RUN=true; shift ;;
     -h|--help)          usage ;;
@@ -65,7 +68,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/log.sh"
 source "${SCRIPT_DIR}/lib/executor.sh"
 
-executor_load_profile "gcp" "$SCRIPT_DIR"
+executor_load_profile "$MIGRATION_PROFILE" "$SCRIPT_DIR"
 executor_init "$KUBECONFIG" ""
 
 if [[ -z "$TEMPLATE_DIR" ]]; then
@@ -115,7 +118,7 @@ if [[ "$DRY_RUN" == true ]]; then
 fi
 
 task.begin "Applying migration plan"
-kubectl_migration apply -f "$PLAN_FILE"
+cat "$PLAN_FILE" | kubectl_migration apply -f -
 
 log.verbose "Waiting for Plan to become Ready..."
 kubectl_migration wait plan/"${VM_NAME}-migration-plan" \
@@ -128,7 +131,7 @@ if [[ "$PLAN_ONLY" == true ]]; then
 fi
 
 task.begin "Triggering migration"
-kubectl_migration apply -f "$MIGRATION_FILE"
+cat "$MIGRATION_FILE" | kubectl_migration apply -f -
 task.pass "Migration created"
 
 log.verbose "Monitor: kubectl get migration ${VM_NAME}-migration -n openshift-mtv -w"

@@ -54,7 +54,12 @@ executor_is_baremetal() {
 executor_load_profile() {
   local profile="${1:-gcp}"
   local script_dir="${2:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
-  local profiles_dir="${script_dir}/../../profiles"
+  local profiles_dir
+  if [[ -d "${script_dir}/../profiles" ]]; then
+    profiles_dir="${script_dir}/../profiles"
+  else
+    profiles_dir="${script_dir}/../../profiles"
+  fi
   local env_file="${profiles_dir}/${profile}.env"
 
   MIGRATION_PROFILE="$profile"
@@ -214,14 +219,10 @@ virtctl_target() {
 # Run a shell command inside the VM via virtctl ssh
 run_on_vm_source() {
   local command="$1"
-  local ssh_key identity_file local_opts
+  local ssh_key identity_file
 
   if executor_is_baremetal; then
     identity_file="$BASTION_SSH_KEY"
-    local_opts="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
-    if [[ -n "$EXECUTOR_LOCAL_SSH_OPTS" ]]; then
-      local_opts="${local_opts} ${EXECUTOR_LOCAL_SSH_OPTS}"
-    fi
     local cmd
     cmd=$(printf '%q' "${EXECUTOR_SSH_USER}@vm/${EXECUTOR_VM_NAME}")
     local cmd_arg
@@ -230,9 +231,11 @@ run_on_vm_source() {
     ns_arg=$(printf '%q' "$EXECUTOR_NAMESPACE")
     local id_arg
     id_arg=$(printf '%q' "$identity_file")
-    local opts_arg
-    opts_arg=$(printf '%q' "$local_opts")
-    local remote="KUBECONFIG=${SOURCE_BASTION_KUBECONFIG} virtctl ssh ${cmd} --namespace ${ns_arg} --identity-file=${id_arg} --local-ssh-opts=${opts_arg} --command ${cmd_arg}"
+    local ssh_opts_flags="--local-ssh-opts='-o StrictHostKeyChecking=no' --local-ssh-opts='-o UserKnownHostsFile=/dev/null'"
+    if [[ -n "$EXECUTOR_LOCAL_SSH_OPTS" ]]; then
+      ssh_opts_flags="${ssh_opts_flags} --local-ssh-opts='${EXECUTOR_LOCAL_SSH_OPTS}'"
+    fi
+    local remote="KUBECONFIG=${SOURCE_BASTION_KUBECONFIG} virtctl ssh ${cmd} --namespace ${ns_arg} --identity-file=${id_arg} ${ssh_opts_flags} --command ${cmd_arg}"
     _executor_run_source_shell "$remote"
   else
     identity_file="$EXECUTOR_LOCAL_SSH_KEY"
@@ -250,10 +253,6 @@ run_on_vm_target() {
   local command="$1"
   if executor_is_baremetal; then
     local identity_file="$BASTION_SSH_KEY"
-    local local_opts="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
-    if [[ -n "$EXECUTOR_LOCAL_SSH_OPTS" ]]; then
-      local_opts="${local_opts} ${EXECUTOR_LOCAL_SSH_OPTS}"
-    fi
     local cmd
     cmd=$(printf '%q' "${EXECUTOR_SSH_USER}@vm/${EXECUTOR_VM_NAME}")
     local cmd_arg
@@ -262,9 +261,11 @@ run_on_vm_target() {
     ns_arg=$(printf '%q' "$EXECUTOR_NAMESPACE")
     local id_arg
     id_arg=$(printf '%q' "$identity_file")
-    local opts_arg
-    opts_arg=$(printf '%q' "$local_opts")
-    local remote="KUBECONFIG=${TARGET_BASTION_KUBECONFIG} virtctl ssh ${cmd} --namespace ${ns_arg} --identity-file=${id_arg} --local-ssh-opts=${opts_arg} --command ${cmd_arg}"
+    local ssh_opts_flags="--local-ssh-opts='-o StrictHostKeyChecking=no' --local-ssh-opts='-o UserKnownHostsFile=/dev/null'"
+    if [[ -n "$EXECUTOR_LOCAL_SSH_OPTS" ]]; then
+      ssh_opts_flags="${ssh_opts_flags} --local-ssh-opts='${EXECUTOR_LOCAL_SSH_OPTS}'"
+    fi
+    local remote="KUBECONFIG=${TARGET_BASTION_KUBECONFIG} virtctl ssh ${cmd} --namespace ${ns_arg} --identity-file=${id_arg} ${ssh_opts_flags} --command ${cmd_arg}"
     _executor_run_target_shell "$remote"
   else
     KUBECONFIG="$EXECUTOR_TARGET_KUBECONFIG" virtctl ssh "${EXECUTOR_SSH_USER}@vm/${EXECUTOR_VM_NAME}" \

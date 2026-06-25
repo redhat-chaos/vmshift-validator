@@ -151,7 +151,8 @@ step.begin "[3/4] MIGRATE + WAIT"
   --provider-dest "$PROVIDER_DEST" \
   --network-map "$NETWORK_MAP" \
   --storage-map "$STORAGE_MAP" \
-  --mtv-namespace "$MTV_NAMESPACE"
+  --mtv-namespace "$MTV_NAMESPACE" \
+  --migration-profile "$MIGRATION_PROFILE"
 
 MAX_ATTEMPTS="$MIGRATION_MAX_ATTEMPTS"
 LAST_STEP=""

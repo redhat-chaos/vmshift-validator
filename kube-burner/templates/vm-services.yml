@@ -1,9 +1,9 @@
 apiVersion: v1
 kind: Secret
 metadata:
-  name: {{.name}}-{{.Replica}}-userdata
+  name: {{.name}}-{{ printf "%.8s" .UUID }}-{{.Replica}}-userdata
   labels:
-    app: {{.name}}-{{.Replica}}
+    app: {{.name}}-{{ printf "%.8s" .UUID }}-{{.Replica}}
     workload-type: services-test
 type: Opaque
 stringData:
@@ -141,9 +141,9 @@ stringData:
 apiVersion: kubevirt.io/v1
 kind: VirtualMachine
 metadata:
-  name: {{.name}}-{{.Replica}}
+  name: {{.name}}-{{ printf "%.8s" .UUID }}-{{.Replica}}
   labels:
-    app: {{.name}}-{{.Replica}}
+    app: {{.name}}-{{ printf "%.8s" .UUID }}-{{.Replica}}
     migration.forklift.konveyor.io/eligible: "true"
     vm-os: {{.osLabel}}
     vm-size: {{.sizeLabel}}
@@ -152,7 +152,7 @@ spec:
   runStrategy: Always
   dataVolumeTemplates:
     - metadata:
-        name: {{.name}}-{{.Replica}}-data-volume
+        name: {{.name}}-{{ printf "%.8s" .UUID }}-{{.Replica}}-data-volume
       spec:
         pvc:
           accessModes:
@@ -166,9 +166,9 @@ spec:
   template:
     metadata:
       labels:
-        kubevirt.io/vm: {{.name}}-{{.Replica}}
-        app: {{.name}}-{{.Replica}}
-        vm-name: {{.name}}-{{.Replica}}
+        kubevirt.io/vm: {{.name}}-{{ printf "%.8s" .UUID }}-{{.Replica}}
+        app: {{.name}}-{{ printf "%.8s" .UUID }}-{{.Replica}}
+        vm-name: {{.name}}-{{ printf "%.8s" .UUID }}-{{.Replica}}
         workload-type: services-test
     spec:
       domain:
@@ -205,7 +205,7 @@ spec:
         - name: cloudinitdisk
           cloudInitNoCloud:
             secretRef:
-              name: {{.name}}-{{.Replica}}-userdata
+              name: {{.name}}-{{ printf "%.8s" .UUID }}-{{.Replica}}-userdata
         - name: datadisk
           dataVolume:
-            name: {{.name}}-{{.Replica}}-data-volume
+            name: {{.name}}-{{ printf "%.8s" .UUID }}-{{.Replica}}-data-volume

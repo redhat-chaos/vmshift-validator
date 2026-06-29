@@ -19,7 +19,8 @@ NAMESPACE="vm-services"
 SSH_KEY="${PROJECT_DIR}/keys/kube-burner"
 SSH_USER="fedora"
 VM_LABEL_SELECTOR="workload-type=services-test"
-STABILIZE_WAIT=30
+STABILIZE_WAIT=5
+WORKLOAD_TIMEOUT=60
 SSH_READY_TIMEOUT=600
 LOCAL_SSH_OPTS="-o StrictHostKeyChecking=accept-new"
 
@@ -39,7 +40,8 @@ Optional:
   --ssh-key PATH             SSH private key (default: keys/kube-burner)
   --ssh-user USER            Guest SSH user (default: fedora)
   --label-selector SEL       Label to discover VMs (default: workload-type=services-test)
-  --stabilize-wait SEC       Wait after kube-burner before checking workloads (default: 30)
+  --stabilize-wait SEC       Wait after kube-burner before checking workloads (default: 5)
+  --workload-timeout SEC     Max seconds to wait for workloads per VM (default: 60)
   --ssh-ready-timeout SEC    Max seconds to wait for guest SSH per VM (default: 600)
   --local-ssh-opts OPTS      Extra virtctl ssh options
 
@@ -57,6 +59,7 @@ while [[ $# -gt 0 ]]; do
     --ssh-user)           SSH_USER="$2"; shift 2 ;;
     --label-selector)     VM_LABEL_SELECTOR="$2"; shift 2 ;;
     --stabilize-wait)     STABILIZE_WAIT="$2"; shift 2 ;;
+    --workload-timeout)   WORKLOAD_TIMEOUT="$2"; shift 2 ;;
     --ssh-ready-timeout)  SSH_READY_TIMEOUT="$2"; shift 2 ;;
     --local-ssh-opts)     LOCAL_SSH_OPTS="$2"; shift 2 ;;
     -h|--help)            usage ;;
@@ -106,43 +109,70 @@ if [[ ${#VM_NAMES[@]} -eq 0 ]]; then
 fi
 
 log.info "Found ${#VM_NAMES[@]} VM(s): ${VM_NAMES[*]}"
-FAILED=0
 
-for vm in "${VM_NAMES[@]}"; do
-  [[ -z "$vm" ]] && continue
+STAB_RESULTS_DIR=$(mktemp -d)
+trap 'rm -rf "$STAB_RESULTS_DIR"' EXIT
+
+stabilize_vm() {
+  local vm="$1"
+  local result_file="${STAB_RESULTS_DIR}/${vm}"
   VM_NAME="$vm"
   VM_CLUSTER="source"
-  task.begin "Stabilizing ${vm}"
 
   if ! wait_for_guest_ssh; then
-    task.fail "${vm}" "SSH timeout"
-    FAILED=$((FAILED + 1))
-    continue
+    echo "FAIL SSH timeout" > "$result_file"
+    return
   fi
 
-  STAB_OK=false
-  STAB_START=$(date +%s)
-  while (( $(date +%s) - STAB_START < STABILIZE_WAIT )); do
-    STAB_OUT=$(run_on_vm "
+  local stab_ok=false
+  local stab_start stab_out stab_lines stab_rows
+  stab_start=$(date +%s)
+  while (( $(date +%s) - stab_start < WORKLOAD_TIMEOUT )); do
+    stab_out=$(run_on_vm "
       LINES=\$(wc -l < /data/test/log.txt 2>/dev/null || echo 0)
       ROWS=\$(sqlite3 /data/test.db 'SELECT count(*) FROM test;' 2>/dev/null || echo 0)
       echo \"\$LINES \$ROWS\"
     " 2>/dev/null || echo "0 0")
-    STAB_LINES=$(echo "$STAB_OUT" | awk '{print $1}')
-    STAB_ROWS=$(echo "$STAB_OUT" | awk '{print $2}')
-    STAB_LINES=${STAB_LINES:-0}
-    STAB_ROWS=${STAB_ROWS:-0}
-    if [[ "$STAB_LINES" -ge 3 ]] && [[ "$STAB_ROWS" -ge 3 ]]; then
-      STAB_OK=true
+    stab_lines=$(echo "$stab_out" | awk '{print $1}')
+    stab_rows=$(echo "$stab_out" | awk '{print $2}')
+    stab_lines=${stab_lines:-0}
+    stab_rows=${stab_rows:-0}
+    if [[ "$stab_lines" -ge 3 ]] && [[ "$stab_rows" -ge 3 ]]; then
+      stab_ok=true
       break
     fi
     sleep 5
   done
 
-  if [[ "$STAB_OK" == "true" ]]; then
-    task.pass "${vm}" "(lines=${STAB_LINES} rows=${STAB_ROWS})"
+  if [[ "$stab_ok" == "true" ]]; then
+    echo "PASS lines=${stab_lines} rows=${stab_rows}" > "$result_file"
   else
-    task.fail "${vm}" "(lines=${STAB_LINES} rows=${STAB_ROWS})"
+    echo "FAIL lines=${stab_lines:-0} rows=${stab_rows:-0}" > "$result_file"
+  fi
+}
+
+PIDS=()
+for vm in "${VM_NAMES[@]}"; do
+  [[ -z "$vm" ]] && continue
+  stabilize_vm "$vm" &
+  PIDS+=($!)
+done
+
+for pid in "${PIDS[@]}"; do
+  wait "$pid" || true
+done
+
+FAILED=0
+for vm in "${VM_NAMES[@]}"; do
+  [[ -z "$vm" ]] && continue
+  result_file="${STAB_RESULTS_DIR}/${vm}"
+  if [[ ! -f "$result_file" ]]; then
+    task.fail "${vm}" "No result"
+    FAILED=$((FAILED + 1))
+  elif grep -q "^PASS" "$result_file"; then
+    task.pass "${vm}" "($(sed 's/^PASS //' "$result_file"))"
+  else
+    task.fail "${vm}" "($(sed 's/^FAIL //' "$result_file"))"
     FAILED=$((FAILED + 1))
   fi
 done

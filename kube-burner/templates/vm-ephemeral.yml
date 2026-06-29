@@ -1,9 +1,9 @@
 apiVersion: kubevirt.io/v1
 kind: VirtualMachine
 metadata:
-  name: {{.name}}-{{.Replica}}
+  name: {{.name}}-{{ .UUID | trunc 8 }}-{{.Replica}}
   labels:
-    app: {{.name}}-{{.Replica}}
+    app: {{.name}}-{{ .UUID | trunc 8 }}-{{.Replica}}
     migration.forklift.konveyor.io/eligible: "true"
     vm-os: {{.osLabel}}
     vm-size: {{.sizeLabel}}
@@ -11,7 +11,7 @@ spec:
   running: true
   dataVolumeTemplates:
     - metadata:
-        name: {{.name}}-{{.Replica}}-data-volume
+        name: {{.name}}-{{ .UUID | trunc 8 }}-{{.Replica}}-data-volume
       spec:
         pvc:
           accessModes:
@@ -25,9 +25,9 @@ spec:
   template:
     metadata:
       labels:
-        kubevirt.io/vm: {{.name}}-{{.Replica}}
-        app: {{.name}}-{{.Replica}}
-        vm-name: {{.name}}-{{.Replica}}
+        kubevirt.io/vm: {{.name}}-{{ .UUID | trunc 8 }}-{{.Replica}}
+        app: {{.name}}-{{ .UUID | trunc 8 }}-{{.Replica}}
+        vm-name: {{.name}}-{{ .UUID | trunc 8 }}-{{.Replica}}
     spec:
       domain:
         cpu:
@@ -77,4 +77,4 @@ spec:
                 - mount -a
         - name: datadisk
           dataVolume:
-            name: {{.name}}-{{.Replica}}-data-volume
+            name: {{.name}}-{{ .UUID | trunc 8 }}-{{.Replica}}-data-volume

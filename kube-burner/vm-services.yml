@@ -16,13 +16,13 @@ jobs:
     waitWhenFinished: true
     podWait: false
     maxWaitTimeout: 30m
-    jobPause: 3m
+    jobPause: 0s
     cleanup: true
     objects:
 
     # 5 small Fedora VMs spread by scheduler
     - objectTemplate: templates/vm-services.yml
-      replicas: 1
+      replicas: 5
       inputVars:
         name: vm-svc
         image: REPLACE_CONTAINER_IMAGE

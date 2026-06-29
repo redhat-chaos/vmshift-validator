@@ -66,8 +66,9 @@ credentials/
 kubeconfig*
 *.kubeconfig
 
-# Environment profiles (contain internal infra details)
-profiles/
+# Environment profiles (contain bastion credentials)
+profiles/*.env
+!profiles/*.env.example
 
 # Infrastructure docs (local copy from scale-lab, not committed)
 infra/

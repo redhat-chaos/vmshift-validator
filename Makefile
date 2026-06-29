@@ -491,8 +491,8 @@ endif
 # ═══════════════════════════════════════════════════════════════
 
 clean-migrations: ## Delete Forklift Plan/Migration CRs
-	@KUBECONFIG=$(SOURCE_KUBECONFIG) kubectl delete migration --all -n $(MTV_NAMESPACE) --ignore-not-found
-	@KUBECONFIG=$(SOURCE_KUBECONFIG) kubectl delete plan --all -n $(MTV_NAMESPACE) --ignore-not-found
+	@KUBECONFIG=$(TARGET_KUBECONFIG) kubectl delete migration --all -n $(MTV_NAMESPACE) --ignore-not-found 2>/dev/null || true
+	@KUBECONFIG=$(TARGET_KUBECONFIG) kubectl delete plan --all -n $(MTV_NAMESPACE) --ignore-not-found 2>/dev/null || true
 	@echo "Migration CRs cleaned."
 
 clean-generated: ## Remove rendered migration manifests

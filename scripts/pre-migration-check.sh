@@ -5,9 +5,6 @@ set -euo pipefail
 # Pre-migration checklist: captures baseline state of VM workloads as JSON.
 # Output file: pre-migration-<vm>-<timestamp>.json
 #
-# Usage:
-#   ./pre-migration-check.sh --kubeconfig <path> --vm <name> [--namespace <ns>] [--ssh-key <path>] [--output-dir <dir>]
-#
 
 NAMESPACE="vm-services"
 SSH_KEY="${HOME}/.ssh/id_rsa"
@@ -23,9 +20,270 @@ CHAOS_SCENARIO=""
 MIGRATION_PROFILE="gcp"
 CLUSTER_ROLE="source"
 
+VM_DATA=""
+CLUSTER_SERVER=""
+VM_STATUS=""
+VM_NODE=""
+VM_IP=""
+TIMESTAMP=""
+OUTPUT_FILE=""
+
 usage() {
   echo "Usage: $0 --kubeconfig <path> --vm <name> [--namespace <ns>] [--ssh-key <path>] [--ssh-user <user>] [--output-dir <dir>] [--local-ssh-opts <opts>] [--ssh-ready-timeout SEC]"
   exit 1
+}
+
+get_val() {
+  local val
+  val=$(echo "$VM_DATA" | grep "^${1}=" | head -1 | cut -d'=' -f2-)
+  if [[ -z "$val" ]]; then
+    log.debug "get_val: key '${1}' not found in VM_DATA, defaulting to 0"
+  fi
+  echo "${val:-0}"
+}
+
+service_status_from_pid() {
+  local pid="$1"
+  [[ "$pid" != "none" && "$pid" != "0" ]] && echo running || echo stopped
+}
+
+collect_cluster_info() {
+  task.begin "Collecting cluster info"
+  CLUSTER_SERVER=$(executor_cluster_server "$CLUSTER_ROLE")
+  if [[ "$CLUSTER_ROLE" == "target" ]]; then
+    VM_STATUS=$(kubectl_target get vm "$VM_NAME" -n "$NAMESPACE" -o jsonpath='{.status.printableStatus}' 2>/dev/null || echo "unknown")
+    VM_NODE=$(kubectl_target get vmi "$VM_NAME" -n "$NAMESPACE" -o jsonpath='{.status.nodeName}' 2>/dev/null || echo "unknown")
+    VM_IP=$(kubectl_target get vmi "$VM_NAME" -n "$NAMESPACE" -o jsonpath='{.status.interfaces[0].ipAddress}' 2>/dev/null || echo "unknown")
+  else
+    VM_STATUS=$(kubectl_source get vm "$VM_NAME" -n "$NAMESPACE" -o jsonpath='{.status.printableStatus}' 2>/dev/null || echo "unknown")
+    VM_NODE=$(kubectl_source get vmi "$VM_NAME" -n "$NAMESPACE" -o jsonpath='{.status.nodeName}' 2>/dev/null || echo "unknown")
+    VM_IP=$(kubectl_source get vmi "$VM_NAME" -n "$NAMESPACE" -o jsonpath='{.status.interfaces[0].ipAddress}' 2>/dev/null || echo "unknown")
+  fi
+  task.pass "Cluster info collected"
+}
+
+collect_vm_workload_data() {
+  task.begin "Collecting VM workload data"
+  VM_DATA=$(collect_vm_data)
+  task.pass "VM workload data collected"
+}
+
+validate_vm_data() {
+  if echo "$VM_DATA" | grep -q "^FILE_WRITER_LINES="; then
+    return 0
+  fi
+
+  log.error "VM data collection failed — no data returned from SSH"
+  jq -n \
+    --arg vm "$VM_NAME" \
+    --arg ns "$NAMESPACE" \
+    --arg ts "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+    --arg server "${CLUSTER_SERVER:-unknown}" \
+    --arg status "${VM_STATUS:-unknown}" \
+    '{
+      type: "pre-migration",
+      vm_name: $vm,
+      namespace: $ns,
+      timestamp_utc: $ts,
+      data_collection_failed: true,
+      cluster: {server: $server, vm_status: $status},
+      error: "SSH connected but data collection returned no recognizable output"
+    }' > "$OUTPUT_FILE"
+  exit 1
+}
+
+build_report_json() {
+  task.begin "Building JSON report"
+
+  local fw_status sqlite_status http_status eph_fw_status eph_sqlite_status
+  fw_status=$(service_status_from_pid "$(get_val FILE_WRITER_PID)")
+  sqlite_status=$(service_status_from_pid "$(get_val SQLITE_PID)")
+  http_status=$(service_status_from_pid "$(get_val HTTP_PID)")
+  eph_fw_status=$(service_status_from_pid "$(get_val EPHEMERAL_FILE_WRITER_PID)")
+  eph_sqlite_status=$(service_status_from_pid "$(get_val EPHEMERAL_SQLITE_PID)")
+
+  jq -n \
+    --arg type "pre-migration" \
+    --arg vm_name "$VM_NAME" \
+    --arg namespace "$NAMESPACE" \
+    --arg chaos_scenario "$CHAOS_SCENARIO" \
+    --arg timestamp_utc "$(get_val CAPTURE_TIME_UTC)" \
+    --arg timestamp_local "$(get_val CAPTURE_TIME_LOCAL)" \
+    --arg cluster_server "$CLUSTER_SERVER" \
+    --arg vm_status "$VM_STATUS" \
+    --arg vm_node "$VM_NODE" \
+    --arg vm_pod_ip "$VM_IP" \
+    --arg fw_status "$fw_status" \
+    --arg fw_pid "$(get_val FILE_WRITER_PID)" \
+    --arg fw_last "$(get_val FILE_WRITER_LAST)" \
+    --argjson fw_lines "$(get_val FILE_WRITER_LINES)" \
+    --argjson fw_size "$(get_val FILE_WRITER_SIZE)" \
+    --arg sqlite_status "$sqlite_status" \
+    --arg sqlite_pid "$(get_val SQLITE_PID)" \
+    --arg sqlite_integrity "$(get_val SQLITE_INTEGRITY)" \
+    --argjson sqlite_rows "$(get_val SQLITE_ROWS)" \
+    --argjson sqlite_min_ts "$(get_val SQLITE_MIN_TS)" \
+    --argjson sqlite_max_ts "$(get_val SQLITE_MAX_TS)" \
+    --argjson sqlite_size "$(get_val SQLITE_SIZE)" \
+    --arg crond_status "$(get_val CROND_STATUS)" \
+    --arg crontab_entry "$(get_val CRONTAB_ENTRY)" \
+    --arg cron_last "$(get_val CRON_LAST)" \
+    --argjson cron_lines "$(get_val CRON_LINES)" \
+    --arg http_status_svc "$http_status" \
+    --arg http_pid "$(get_val HTTP_PID)" \
+    --argjson http_code "$(get_val HTTP_STATUS)" \
+    --arg eph_fw_status "$eph_fw_status" \
+    --arg eph_fw_pid "$(get_val EPHEMERAL_FILE_WRITER_PID)" \
+    --arg eph_fw_last "$(get_val EPHEMERAL_FILE_WRITER_LAST)" \
+    --argjson eph_fw_lines "$(get_val EPHEMERAL_FILE_WRITER_LINES)" \
+    --argjson eph_fw_size "$(get_val EPHEMERAL_FILE_WRITER_SIZE)" \
+    --arg eph_sqlite_status "$eph_sqlite_status" \
+    --arg eph_sqlite_pid "$(get_val EPHEMERAL_SQLITE_PID)" \
+    --arg eph_sqlite_integrity "$(get_val EPHEMERAL_SQLITE_INTEGRITY)" \
+    --argjson eph_sqlite_rows "$(get_val EPHEMERAL_SQLITE_ROWS)" \
+    --argjson eph_sqlite_min_ts "$(get_val EPHEMERAL_SQLITE_MIN_TS)" \
+    --argjson eph_sqlite_max_ts "$(get_val EPHEMERAL_SQLITE_MAX_TS)" \
+    --argjson eph_sqlite_size "$(get_val EPHEMERAL_SQLITE_SIZE)" \
+    --arg vm_hostname "$(get_val VM_HOSTNAME)" \
+    --arg vm_ip "$(get_val VM_IP_INTERNAL)" \
+    --argjson vm_uptime "$(get_val VM_UPTIME)" \
+    --argjson disk_total "$(get_val DISK_TOTAL)" \
+    --argjson disk_used "$(get_val DISK_USED)" \
+    --argjson disk_avail "$(get_val DISK_AVAIL)" \
+    --argjson data_dir_size "$(get_val DATA_DIR_SIZE)" \
+    --arg log_sha "$(get_val LOG_FILE_SHA256)" \
+    --argjson log_size "$(get_val LOG_FILE_SIZE)" \
+    --arg db_sha "$(get_val DB_FILE_SHA256)" \
+    --argjson db_size "$(get_val DB_FILE_SIZE)" \
+    --argjson large_size "$(get_val LARGE_FILE_SIZE)" \
+    --arg large_sha "$(get_val LARGE_FILE_SHA256)" \
+    --argjson eph_large_size "$(get_val EPHEMERAL_LARGE_FILE_SIZE)" \
+    --arg eph_large_sha "$(get_val EPHEMERAL_LARGE_FILE_SHA256)" \
+    '{
+      type: $type,
+      vm_name: $vm_name,
+      namespace: $namespace,
+      chaos_scenario: $chaos_scenario,
+      timestamp_utc: $timestamp_utc,
+      timestamp_local: $timestamp_local,
+      cluster: {
+        server: $cluster_server,
+        vm_status: $vm_status,
+        vm_node: $vm_node,
+        vm_pod_ip: $vm_pod_ip
+      },
+      workloads: {
+        persistent_vdc: {
+          mount_point: "/data",
+          device: "/dev/vdc",
+          file_writer: {
+            status: $fw_status,
+            pid: $fw_pid,
+            file: "/data/test/log.txt",
+            line_count: $fw_lines,
+            file_size_bytes: $fw_size,
+            last_entry: $fw_last,
+            write_interval_sec: 1
+          },
+          sqlite_writer: {
+            status: $sqlite_status,
+            pid: $sqlite_pid,
+            file: "/data/test.db",
+            row_count: $sqlite_rows,
+            min_timestamp: $sqlite_min_ts,
+            max_timestamp: $sqlite_max_ts,
+            integrity_check: $sqlite_integrity,
+            file_size_bytes: $sqlite_size,
+            insert_interval_sec: 2
+          },
+          cron_job: {
+            crond_status: $crond_status,
+            crontab_entry: $crontab_entry,
+            log_file: "/data/test/cron.log",
+            log_line_count: $cron_lines,
+            last_entry: $cron_last,
+            interval: "every 1 minute"
+          },
+          http_server: {
+            status: $http_status_svc,
+            pid: $http_pid,
+            port: 8080,
+            http_response_code: $http_code
+          }
+        },
+        ephemeral_vda: {
+          mount_point: "/var/lib/test-ephemeral",
+          device: "/dev/vda",
+          file_writer: {
+            status: $eph_fw_status,
+            pid: $eph_fw_pid,
+            file: "/var/lib/test-ephemeral/log.txt",
+            line_count: $eph_fw_lines,
+            file_size_bytes: $eph_fw_size,
+            last_entry: $eph_fw_last,
+            write_interval_sec: 1
+          },
+          sqlite_writer: {
+            status: $eph_sqlite_status,
+            pid: $eph_sqlite_pid,
+            file: "/var/lib/test-ephemeral/test.db",
+            row_count: $eph_sqlite_rows,
+            min_timestamp: $eph_sqlite_min_ts,
+            max_timestamp: $eph_sqlite_max_ts,
+            integrity_check: $eph_sqlite_integrity,
+            file_size_bytes: $eph_sqlite_size,
+            insert_interval_sec: 2
+          }
+        }
+      },
+      vm_info: {
+        hostname: $vm_hostname,
+        ip_address: $vm_ip,
+        uptime_seconds: $vm_uptime,
+        disk: {
+          total_bytes: $disk_total,
+          used_bytes: $disk_used,
+          available_bytes: $disk_avail
+        },
+        data_dir_size_bytes: $data_dir_size
+      },
+      file_validation: {
+        persistent_vdc: {
+          log_file: "/data/test/log.txt",
+          log_sha256: $log_sha,
+          log_size_bytes: $log_size,
+          db_file: "/data/test.db",
+          db_sha256: $db_sha,
+          db_size_bytes: $db_size
+        }
+      },
+      large_data_validation: {
+        persistent_vdc: {
+          file_path: "/data/large-file.bin",
+          file_size_bytes: $large_size,
+          sha256: $large_sha
+        },
+        ephemeral_vda: {
+          file_path: "/var/lib/test-ephemeral/large-file.bin",
+          file_size_bytes: $eph_large_size,
+          sha256: $eph_large_sha
+        }
+      }
+    }' > "$OUTPUT_FILE"
+
+  task.pass "JSON report saved"
+  log.verbose "Output: ${OUTPUT_FILE}"
+}
+
+print_verbose_summary() {
+  log.verbose "Persistent (vdc):"
+  log.verbose "  File writer:  $(get_val FILE_WRITER_LINES) lines, PID $(get_val FILE_WRITER_PID)"
+  log.verbose "  SQLite DB:    $(get_val SQLITE_ROWS) rows, integrity=$(get_val SQLITE_INTEGRITY)"
+  log.verbose "  Cron log:     $(get_val CRON_LINES) entries, crond=$(get_val CROND_STATUS)"
+  log.verbose "  HTTP server:  status=$(get_val HTTP_STATUS), PID $(get_val HTTP_PID)"
+  log.verbose "Ephemeral (vda):"
+  log.verbose "  File writer:  $(get_val EPHEMERAL_FILE_WRITER_LINES) lines, PID $(get_val EPHEMERAL_FILE_WRITER_PID)"
+  log.verbose "  SQLite DB:    $(get_val EPHEMERAL_SQLITE_ROWS) rows, integrity=$(get_val EPHEMERAL_SQLITE_INTEGRITY)"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -48,10 +306,10 @@ done
 [[ -z "$KUBECONFIG_PATH" ]] && { echo "ERROR: --kubeconfig is required"; usage; }
 [[ -z "$VM_NAME" ]] && { echo "ERROR: --vm is required"; usage; }
 
-# ── Shared libraries ──────────────────────────────────────────
 source "${SCRIPT_DIR}/lib/log.sh"
 source "${SCRIPT_DIR}/lib/executor.sh"
 source "${SCRIPT_DIR}/lib/ssh.sh"
+source "${SCRIPT_DIR}/lib/vm-data-collector.sh"
 
 executor_load_profile "$MIGRATION_PROFILE" "$SCRIPT_DIR"
 if [[ "$MIGRATION_PROFILE" == "gcp" ]]; then
@@ -66,214 +324,9 @@ OUTPUT_FILE="${OUTPUT_DIR}/pre-migration-${VM_NAME}-${TIMESTAMP}.json"
 
 log.verbose "Pre-Migration Check: ${VM_NAME} (${TIMESTAMP})"
 
-# ── Wait for SSH ──────────────────────────────────────────────
 wait_for_guest_ssh
-
-# ── Collect cluster info ──────────────────────────────────────
-task.begin "Collecting cluster info"
-CLUSTER_SERVER=$(executor_cluster_server "$CLUSTER_ROLE")
-if [[ "$CLUSTER_ROLE" == "target" ]]; then
-  VM_STATUS=$(kubectl_target get vm "$VM_NAME" -n "$NAMESPACE" -o jsonpath='{.status.printableStatus}' 2>/dev/null || echo "unknown")
-  VM_NODE=$(kubectl_target get vmi "$VM_NAME" -n "$NAMESPACE" -o jsonpath='{.status.nodeName}' 2>/dev/null || echo "unknown")
-  VM_IP=$(kubectl_target get vmi "$VM_NAME" -n "$NAMESPACE" -o jsonpath='{.status.interfaces[0].ipAddress}' 2>/dev/null || echo "unknown")
-else
-  VM_STATUS=$(kubectl_source get vm "$VM_NAME" -n "$NAMESPACE" -o jsonpath='{.status.printableStatus}' 2>/dev/null || echo "unknown")
-  VM_NODE=$(kubectl_source get vmi "$VM_NAME" -n "$NAMESPACE" -o jsonpath='{.status.nodeName}' 2>/dev/null || echo "unknown")
-  VM_IP=$(kubectl_source get vmi "$VM_NAME" -n "$NAMESPACE" -o jsonpath='{.status.interfaces[0].ipAddress}' 2>/dev/null || echo "unknown")
-fi
-task.pass "Cluster info collected"
-
-# ── Collect VM workload data (stdout captured — no logging inside) ──
-task.begin "Collecting VM workload data"
-VM_DATA=$(run_on_vm "
-echo \"CAPTURE_TIME_UTC=\$(date -u '+%Y-%m-%dT%H:%M:%S UTC')\"
-echo \"CAPTURE_TIME_LOCAL=\$(date '+%Y-%m-%d %H:%M:%S %Z')\"
-
-echo \"FILE_WRITER_LINES=\$(wc -l < /data/test/log.txt 2>/dev/null || echo 0)\"
-echo \"FILE_WRITER_SIZE=\$(du -b /data/test/log.txt 2>/dev/null | cut -f1 || echo 0)\"
-echo \"FILE_WRITER_LAST=\$(tail -1 /data/test/log.txt 2>/dev/null || echo none)\"
-echo \"FILE_WRITER_PID=\$(systemctl show -p MainPID file-writer.service 2>/dev/null | cut -d= -f2 || echo none)\"
-
-echo \"SQLITE_ROWS=\$(python3 -c 'import sqlite3; c=sqlite3.connect(\"/data/test.db\"); print(c.execute(\"SELECT count(*) FROM test\").fetchone()[0])' 2>/dev/null || echo 0)\"
-echo \"SQLITE_MAX_TS=\$(python3 -c 'import sqlite3; c=sqlite3.connect(\"/data/test.db\"); print(c.execute(\"SELECT max(timestamp) FROM test\").fetchone()[0] or 0)' 2>/dev/null || echo 0)\"
-echo \"SQLITE_MIN_TS=\$(python3 -c 'import sqlite3; c=sqlite3.connect(\"/data/test.db\"); print(c.execute(\"SELECT min(timestamp) FROM test\").fetchone()[0] or 0)' 2>/dev/null || echo 0)\"
-echo \"SQLITE_INTEGRITY=\$(python3 -c 'import sqlite3; c=sqlite3.connect(\"/data/test.db\"); print(c.execute(\"PRAGMA integrity_check\").fetchone()[0])' 2>/dev/null || echo unknown)\"
-echo \"SQLITE_SIZE=\$(du -b /data/test.db 2>/dev/null | cut -f1 || echo 0)\"
-echo \"SQLITE_PID=\$(systemctl show -p MainPID sqlite-writer.service 2>/dev/null | cut -d= -f2 || echo none)\"
-
-echo \"CRON_LINES=\$(wc -l < /data/test/cron.log 2>/dev/null || echo 0)\"
-echo \"CRON_LAST=\$(tail -1 /data/test/cron.log 2>/dev/null || echo none)\"
-echo \"CROND_STATUS=\$(systemctl is-active crond 2>/dev/null || echo inactive)\"
-echo \"CRONTAB_ENTRY=\$(crontab -l 2>/dev/null | head -1 || echo none)\"
-
-echo \"HTTP_STATUS=\$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080 2>/dev/null | awk '{printf \"%d\", \$1}' || echo 0)\"
-echo \"HTTP_PID=\$(systemctl show -p MainPID http-server.service 2>/dev/null | cut -d= -f2 || echo none)\"
-
-echo \"VM_HOSTNAME=\$(hostname)\"
-echo \"VM_IP_INTERNAL=\$(ip -4 addr show | grep 'inet ' | grep -v 127.0.0 | awk '{print \$2}' | head -1)\"
-echo \"VM_UPTIME=\$(cat /proc/uptime | awk '{print \$1}')\"
-echo \"DISK_TOTAL=\$(df -B1 / | tail -1 | awk '{print \$2}')\"
-echo \"DISK_USED=\$(df -B1 / | tail -1 | awk '{print \$3}')\"
-echo \"DISK_AVAIL=\$(df -B1 / | tail -1 | awk '{print \$4}')\"
-echo \"DATA_DIR_SIZE=\$(du -sb /data/test/ 2>/dev/null | cut -f1 || echo 0)\"
-
-echo \"LOG_FILE_SHA256=\$(sha256sum /data/test/log.txt 2>/dev/null | awk '{print \$1}' || echo none)\"
-echo \"LOG_FILE_SIZE=\$(stat -c%s /data/test/log.txt 2>/dev/null || echo 0)\"
-echo \"DB_FILE_SHA256=\$(sha256sum /data/test.db 2>/dev/null | awk '{print \$1}' || echo none)\"
-echo \"DB_FILE_SIZE=\$(stat -c%s /data/test.db 2>/dev/null || echo 0)\"
-echo \"LARGE_FILE_SIZE=\$(stat -c%s /data/large-file.bin 2>/dev/null || echo 0)\"
-echo \"LARGE_FILE_SHA256=\$(sha256sum /data/large-file.bin 2>/dev/null | awk '{print \$1}' || echo none)\"
-
-echo \"EPHEMERAL_FILE_WRITER_LINES=\$(wc -l < /var/lib/test-ephemeral/log.txt 2>/dev/null || echo 0)\"
-echo \"EPHEMERAL_FILE_WRITER_SIZE=\$(du -b /var/lib/test-ephemeral/log.txt 2>/dev/null | cut -f1 || echo 0)\"
-echo \"EPHEMERAL_FILE_WRITER_LAST=\$(tail -1 /var/lib/test-ephemeral/log.txt 2>/dev/null || echo none)\"
-echo \"EPHEMERAL_FILE_WRITER_PID=\$(pgrep -f 'test-ephemeral/log.txt' -o 2>/dev/null || echo none)\"
-
-echo \"EPHEMERAL_SQLITE_ROWS=\$(python3 -c 'import sqlite3; c=sqlite3.connect(\"/var/lib/test-ephemeral/test.db\"); print(c.execute(\"SELECT count(*) FROM test\").fetchone()[0])' 2>/dev/null || echo 0)\"
-echo \"EPHEMERAL_SQLITE_MAX_TS=\$(python3 -c 'import sqlite3; c=sqlite3.connect(\"/var/lib/test-ephemeral/test.db\"); print(c.execute(\"SELECT max(timestamp) FROM test\").fetchone()[0] or 0)' 2>/dev/null || echo 0)\"
-echo \"EPHEMERAL_SQLITE_MIN_TS=\$(python3 -c 'import sqlite3; c=sqlite3.connect(\"/var/lib/test-ephemeral/test.db\"); print(c.execute(\"SELECT min(timestamp) FROM test\").fetchone()[0] or 0)' 2>/dev/null || echo 0)\"
-echo \"EPHEMERAL_SQLITE_INTEGRITY=\$(python3 -c 'import sqlite3; c=sqlite3.connect(\"/var/lib/test-ephemeral/test.db\"); print(c.execute(\"PRAGMA integrity_check\").fetchone()[0])' 2>/dev/null || echo unknown)\"
-echo \"EPHEMERAL_SQLITE_SIZE=\$(du -b /var/lib/test-ephemeral/test.db 2>/dev/null | cut -f1 || echo 0)\"
-echo \"EPHEMERAL_SQLITE_PID=\$(pgrep -f 'sqlite-writer-ephemeral' -o 2>/dev/null || echo none)\"
-
-echo \"EPHEMERAL_DIR_SIZE=\$(du -sb /var/lib/test-ephemeral/ 2>/dev/null | cut -f1 || echo 0)\"
-echo \"EPHEMERAL_LARGE_FILE_SIZE=\$(stat -c%s /var/lib/test-ephemeral/large-file.bin 2>/dev/null || echo 0)\"
-echo \"EPHEMERAL_LARGE_FILE_SHA256=\$(sha256sum /var/lib/test-ephemeral/large-file.bin 2>/dev/null | awk '{print \$1}' || echo none)\"
-")
-task.pass "VM workload data collected"
-
-get_val() {
-  local val
-  val=$(echo "$VM_DATA" | grep "^${1}=" | head -1 | cut -d'=' -f2-)
-  echo "${val:-0}"
-}
-
-# ── Build JSON report ─────────────────────────────────────────
-task.begin "Building JSON report"
-
-cat > "$OUTPUT_FILE" << JSONEOF
-{
-  "type": "pre-migration",
-  "vm_name": "${VM_NAME}",
-  "namespace": "${NAMESPACE}",
-  "chaos_scenario": "${CHAOS_SCENARIO}",
-  "timestamp_utc": "$(get_val CAPTURE_TIME_UTC)",
-  "timestamp_local": "$(get_val CAPTURE_TIME_LOCAL)",
-  "cluster": {
-    "server": "${CLUSTER_SERVER}",
-    "vm_status": "${VM_STATUS}",
-    "vm_node": "${VM_NODE}",
-    "vm_pod_ip": "${VM_IP}"
-  },
-  "workloads": {
-    "persistent_vdc": {
-      "mount_point": "/data",
-      "device": "/dev/vdc",
-      "file_writer": {
-        "status": "$([ "$(get_val FILE_WRITER_PID)" != "none" ] && echo running || echo stopped)",
-        "pid": "$(get_val FILE_WRITER_PID)",
-        "file": "/data/test/log.txt",
-        "line_count": $(get_val FILE_WRITER_LINES),
-        "file_size_bytes": $(get_val FILE_WRITER_SIZE),
-        "last_entry": "$(get_val FILE_WRITER_LAST)",
-        "write_interval_sec": 1
-      },
-      "sqlite_writer": {
-        "status": "$([ "$(get_val SQLITE_PID)" != "none" ] && echo running || echo stopped)",
-        "pid": "$(get_val SQLITE_PID)",
-        "file": "/data/test.db",
-        "row_count": $(get_val SQLITE_ROWS),
-        "min_timestamp": $(get_val SQLITE_MIN_TS),
-        "max_timestamp": $(get_val SQLITE_MAX_TS),
-        "integrity_check": "$(get_val SQLITE_INTEGRITY)",
-        "file_size_bytes": $(get_val SQLITE_SIZE),
-        "insert_interval_sec": 2
-      },
-      "cron_job": {
-        "crond_status": "$(get_val CROND_STATUS)",
-        "crontab_entry": "$(get_val CRONTAB_ENTRY)",
-        "log_file": "/data/test/cron.log",
-        "log_line_count": $(get_val CRON_LINES),
-        "last_entry": "$(get_val CRON_LAST)",
-        "interval": "every 1 minute"
-      },
-      "http_server": {
-        "status": "$([ "$(get_val HTTP_PID)" != "none" ] && echo running || echo stopped)",
-        "pid": "$(get_val HTTP_PID)",
-        "port": 8080,
-        "http_response_code": $(get_val HTTP_STATUS)
-      }
-    },
-    "ephemeral_vda": {
-      "mount_point": "/var/lib/test-ephemeral",
-      "device": "/dev/vda",
-      "file_writer": {
-        "status": "$([ "$(get_val EPHEMERAL_FILE_WRITER_PID)" != "none" ] && echo running || echo stopped)",
-        "pid": "$(get_val EPHEMERAL_FILE_WRITER_PID)",
-        "file": "/var/lib/test-ephemeral/log.txt",
-        "line_count": $(get_val EPHEMERAL_FILE_WRITER_LINES),
-        "file_size_bytes": $(get_val EPHEMERAL_FILE_WRITER_SIZE),
-        "last_entry": "$(get_val EPHEMERAL_FILE_WRITER_LAST)",
-        "write_interval_sec": 1
-      },
-      "sqlite_writer": {
-        "status": "$([ "$(get_val EPHEMERAL_SQLITE_PID)" != "none" ] && echo running || echo stopped)",
-        "pid": "$(get_val EPHEMERAL_SQLITE_PID)",
-        "file": "/var/lib/test-ephemeral/test.db",
-        "row_count": $(get_val EPHEMERAL_SQLITE_ROWS),
-        "min_timestamp": $(get_val EPHEMERAL_SQLITE_MIN_TS),
-        "max_timestamp": $(get_val EPHEMERAL_SQLITE_MAX_TS),
-        "integrity_check": "$(get_val EPHEMERAL_SQLITE_INTEGRITY)",
-        "file_size_bytes": $(get_val EPHEMERAL_SQLITE_SIZE),
-        "insert_interval_sec": 2
-      }
-    }
-  },
-  "vm_info": {
-    "hostname": "$(get_val VM_HOSTNAME)",
-    "ip_address": "$(get_val VM_IP_INTERNAL)",
-    "uptime_seconds": $(get_val VM_UPTIME),
-    "disk": {
-      "total_bytes": $(get_val DISK_TOTAL),
-      "used_bytes": $(get_val DISK_USED),
-      "available_bytes": $(get_val DISK_AVAIL)
-    },
-    "data_dir_size_bytes": $(get_val DATA_DIR_SIZE)
-  },
-  "file_validation": {
-    "persistent_vdc": {
-      "log_file": "/data/test/log.txt",
-      "log_sha256": "$(get_val LOG_FILE_SHA256)",
-      "log_size_bytes": $(get_val LOG_FILE_SIZE),
-      "db_file": "/data/test.db",
-      "db_sha256": "$(get_val DB_FILE_SHA256)",
-      "db_size_bytes": $(get_val DB_FILE_SIZE)
-    }
-  },
-  "large_data_validation": {
-    "persistent_vdc": {
-      "file_path": "/data/large-file.bin",
-      "file_size_bytes": $(get_val LARGE_FILE_SIZE),
-      "sha256": "$(get_val LARGE_FILE_SHA256)"
-    },
-    "ephemeral_vda": {
-      "file_path": "/var/lib/test-ephemeral/large-file.bin",
-      "file_size_bytes": $(get_val EPHEMERAL_LARGE_FILE_SIZE),
-      "sha256": "$(get_val EPHEMERAL_LARGE_FILE_SHA256)"
-    }
-  }
-}
-JSONEOF
-
-task.pass "JSON report saved"
-log.verbose "Output: ${OUTPUT_FILE}"
-
-# ── Quick summary (verbose only) ──────────────────────────────
-log.verbose "Persistent (vdc):"
-log.verbose "  File writer:  $(get_val FILE_WRITER_LINES) lines, PID $(get_val FILE_WRITER_PID)"
-log.verbose "  SQLite DB:    $(get_val SQLITE_ROWS) rows, integrity=$(get_val SQLITE_INTEGRITY)"
-log.verbose "  Cron log:     $(get_val CRON_LINES) entries, crond=$(get_val CROND_STATUS)"
-log.verbose "  HTTP server:  status=$(get_val HTTP_STATUS), PID $(get_val HTTP_PID)"
-log.verbose "Ephemeral (vda):"
-log.verbose "  File writer:  $(get_val EPHEMERAL_FILE_WRITER_LINES) lines, PID $(get_val EPHEMERAL_FILE_WRITER_PID)"
-log.verbose "  SQLite DB:    $(get_val EPHEMERAL_SQLITE_ROWS) rows, integrity=$(get_val EPHEMERAL_SQLITE_INTEGRITY)"
+collect_cluster_info
+collect_vm_workload_data
+validate_vm_data
+build_report_json
+print_verbose_summary

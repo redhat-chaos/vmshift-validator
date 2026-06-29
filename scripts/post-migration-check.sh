@@ -5,16 +5,6 @@ set -euo pipefail
 # Post-migration checklist: captures post-migration state and compares with pre-migration JSON.
 # Output file: post-migration-<vm>-<timestamp>.json
 #
-# Usage:
-#   ./post-migration-check.sh --kubeconfig <path> --vm <name> [--namespace <ns>] [--ssh-key <path>] \
-#     [--output-dir <dir>] [--pre-migration-file <path>]
-#
-# Example:
-#   ./post-migration-check.sh \
-#     --kubeconfig /path/to/green/kubeconfig \
-#     --vm mercury-vm \
-#     --pre-migration-file ./pre-migration-mercury-vm-20260324T091004Z.json
-#
 
 NAMESPACE="vm-services"
 SSH_KEY="${HOME}/.ssh/id_rsa"
@@ -29,134 +19,209 @@ SSH_READY_TIMEOUT=600
 SSH_READY_INTERVAL=15
 CHAOS_SCENARIO=""
 
+# Globals populated during execution
+VM_DATA=""
+CLUSTER_SERVER=""
+VM_STATUS=""
+VM_NODE=""
+VM_IP=""
+TIMESTAMP=""
+OUTPUT_FILE=""
+
+# Pre-migration baseline
+PRE_FILE_WRITER_LINES=0
+PRE_SQLITE_ROWS=0
+PRE_CRON_LINES=0
+PRE_FILE_WRITER_PID="unknown"
+PRE_SQLITE_PID="unknown"
+PRE_HTTP_PID="unknown"
+PRE_HOSTNAME="unknown"
+PRE_CLUSTER_SERVER="unknown"
+PRE_LARGE_FILE_SHA256="none"
+PRE_LARGE_FILE_SIZE=0
+PRE_LOG_FILE_SHA256="none"
+PRE_LOG_FILE_SIZE=0
+PRE_DB_FILE_SHA256="none"
+PRE_DB_FILE_SIZE=0
+PRE_EPHEMERAL_FILE_WRITER_LINES=0
+PRE_EPHEMERAL_SQLITE_ROWS=0
+PRE_EPHEMERAL_FILE_WRITER_PID="unknown"
+PRE_EPHEMERAL_SQLITE_PID="unknown"
+PRE_EPHEMERAL_LARGE_FILE_SHA256="none"
+PRE_EPHEMERAL_LARGE_FILE_SIZE=0
+PRE_CROND_STATUS="unknown"
+HAS_PRE="false"
+
+# Post / comparison
+POST_FILE_WRITER_LINES=0
+POST_SQLITE_ROWS=0
+POST_CRON_LINES=0
+POST_EPHEMERAL_FILE_WRITER_LINES=0
+POST_EPHEMERAL_SQLITE_ROWS=0
+FILE_WRITER_DIFF=0
+SQLITE_DIFF=0
+CRON_DIFF=0
+EPHEMERAL_FILE_WRITER_DIFF=0
+EPHEMERAL_SQLITE_DIFF=0
+FILE_WRITER_PID_MATCH="unknown"
+SQLITE_PID_MATCH="unknown"
+HTTP_PID_MATCH="unknown"
+EPHEMERAL_FILE_WRITER_PID_MATCH="unknown"
+EPHEMERAL_SQLITE_PID_MATCH="unknown"
+MIGRATION_TYPE="unknown"
+POST_LARGE_FILE_SHA256="none"
+POST_LARGE_FILE_SIZE=0
+POST_LOG_FILE_SHA256="none"
+POST_LOG_FILE_SIZE=0
+POST_DB_FILE_SHA256="none"
+POST_DB_FILE_SIZE=0
+POST_EPHEMERAL_LARGE_FILE_SHA256="none"
+POST_EPHEMERAL_LARGE_FILE_SIZE=0
+LARGE_DATA_INTACT="false"
+LOG_FILE_INTACT="false"
+DB_FILE_INTACT="false"
+EPHEMERAL_DATA_INTACT="false"
+
+# Gap analysis
+SQLITE_GAP_DATA="[]"
+AFFECTED_WINDOWS='{"affected_from_utc":"none","affected_to_utc":"none","duration_sec":0,"total_affected_windows":0,"total_slow_inserts_in_window":0,"total_inserts_in_window":0,"avg_slow_pct":0}'
+JITTER_COUNT=0
+FILE_WRITER_GAP_DATA="[]"
+EPHEMERAL_FILE_WRITER_GAP_DATA="[]"
+CRON_GAP_DATA="[]"
+
+# Verdict statuses
+PERSISTENT_FILE_WRITER_STATUS="PASS"
+PERSISTENT_SQLITE_STATUS="PASS"
+PERSISTENT_SQLITE_INTEGRITY_STATUS="PASS"
+PERSISTENT_CRON_STATUS="PASS"
+PERSISTENT_LARGE_FILE_STATUS="PASS"
+EPHEMERAL_FILE_WRITER_STATUS="PASS"
+EPHEMERAL_SQLITE_STATUS="PASS"
+EPHEMERAL_SQLITE_INTEGRITY_STATUS="PASS"
+EPHEMERAL_LARGE_FILE_STATUS="PASS"
+HTTP_STATUS_CHECK="PASS"
+CROND_STATUS_CHECK="PASS"
+SERVICES_RUNNING_STATUS="PASS"
+OVERALL="PASS"
+
 usage() {
   echo "Usage: $0 --kubeconfig <path> --vm <name> [--namespace <ns>] [--ssh-key <path>] [--ssh-user <user>] [--output-dir <dir>] [--pre-migration-file <path>] [--local-ssh-opts <opts>] [--ssh-ready-timeout SEC]"
   exit 1
 }
 
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --kubeconfig)          KUBECONFIG_PATH="$2"; shift 2 ;;
-    --vm)                  VM_NAME="$2"; shift 2 ;;
-    --namespace)           NAMESPACE="$2"; shift 2 ;;
-    --ssh-key)             SSH_KEY="$2"; shift 2 ;;
-    --ssh-user)            SSH_USER="$2"; shift 2 ;;
-    --output-dir)          OUTPUT_DIR="$2"; shift 2 ;;
-    --pre-migration-file)  PRE_MIGRATION_FILE="$2"; shift 2 ;;
-    --local-ssh-opts)      LOCAL_SSH_OPTS="$2"; shift 2 ;;
-    --ssh-ready-timeout)   SSH_READY_TIMEOUT="$2"; shift 2 ;;
-    --chaos-scenario)      CHAOS_SCENARIO="$2"; shift 2 ;;
-    --migration-profile)   MIGRATION_PROFILE="$2"; shift 2 ;;
-    --cluster-role)        CLUSTER_ROLE="$2"; shift 2 ;;
-    *) echo "Unknown option: $1"; usage ;;
-  esac
-done
+bool_json() {
+  [[ "$1" == "true" ]] && echo true || echo false
+}
 
-[[ -z "$KUBECONFIG_PATH" ]] && { echo "ERROR: --kubeconfig is required"; usage; }
-[[ -z "$VM_NAME" ]] && { echo "ERROR: --vm is required"; usage; }
+json_or_empty_array() {
+  echo "${1:-[]}" | jq -c . 2>/dev/null || echo '[]'
+}
 
-# ── Shared libraries ──────────────────────────────────────────
-source "${SCRIPT_DIR}/lib/log.sh"
-source "${SCRIPT_DIR}/lib/executor.sh"
-source "${SCRIPT_DIR}/lib/ssh.sh"
-
-MIGRATION_PROFILE="${MIGRATION_PROFILE:-gcp}"
-CLUSTER_ROLE="${CLUSTER_ROLE:-target}"
-
-executor_load_profile "$MIGRATION_PROFILE" "$SCRIPT_DIR"
-if [[ "$MIGRATION_PROFILE" == "gcp" ]]; then
-  executor_init "" "$KUBECONFIG_PATH"
-fi
-
-VM_CLUSTER="$CLUSTER_ROLE"
-mkdir -p "$OUTPUT_DIR"
-
-TIMESTAMP=$(date -u '+%Y%m%dT%H%M%SZ')
-OUTPUT_FILE="${OUTPUT_DIR}/post-migration-${VM_NAME}-${TIMESTAMP}.json"
-
-log.verbose "Post-Migration Check: ${VM_NAME} (${TIMESTAMP})"
-
-wait_for_guest_ssh
-
-task.begin "Collecting cluster info"
-CLUSTER_SERVER=$(executor_cluster_server "$CLUSTER_ROLE")
-VM_STATUS=$(kubectl_target get vm "$VM_NAME" -n "$NAMESPACE" -o jsonpath='{.status.printableStatus}' 2>/dev/null || echo "unknown")
-VM_NODE=$(kubectl_target get vmi "$VM_NAME" -n "$NAMESPACE" -o jsonpath='{.status.nodeName}' 2>/dev/null || echo "unknown")
-VM_IP=$(kubectl_target get vmi "$VM_NAME" -n "$NAMESPACE" -o jsonpath='{.status.interfaces[0].ipAddress}' 2>/dev/null || echo "unknown")
-
-task.pass "Cluster info collected"
-
-task.begin "Collecting VM workload data"
-VM_DATA=$(run_on_vm "
-echo \"CAPTURE_TIME_UTC=\$(date -u '+%Y-%m-%dT%H:%M:%S UTC')\"
-echo \"CAPTURE_TIME_LOCAL=\$(date '+%Y-%m-%d %H:%M:%S %Z')\"
-
-echo \"FILE_WRITER_LINES=\$(wc -l < /data/test/log.txt 2>/dev/null || echo 0)\"
-echo \"FILE_WRITER_SIZE=\$(du -b /data/test/log.txt 2>/dev/null | cut -f1 || echo 0)\"
-echo \"FILE_WRITER_LAST=\$(tail -1 /data/test/log.txt 2>/dev/null || echo none)\"
-echo \"FILE_WRITER_PID=\$(systemctl show -p MainPID file-writer.service 2>/dev/null | cut -d= -f2 || echo none)\"
-
-echo \"SQLITE_ROWS=\$(python3 -c 'import sqlite3; c=sqlite3.connect(\"/data/test.db\"); print(c.execute(\"SELECT count(*) FROM test\").fetchone()[0])' 2>/dev/null || echo 0)\"
-echo \"SQLITE_MAX_TS=\$(python3 -c 'import sqlite3; c=sqlite3.connect(\"/data/test.db\"); print(c.execute(\"SELECT max(timestamp) FROM test\").fetchone()[0] or 0)' 2>/dev/null || echo 0)\"
-echo \"SQLITE_MIN_TS=\$(python3 -c 'import sqlite3; c=sqlite3.connect(\"/data/test.db\"); print(c.execute(\"SELECT min(timestamp) FROM test\").fetchone()[0] or 0)' 2>/dev/null || echo 0)\"
-echo \"SQLITE_INTEGRITY=\$(python3 -c 'import sqlite3; c=sqlite3.connect(\"/data/test.db\"); print(c.execute(\"PRAGMA integrity_check\").fetchone()[0])' 2>/dev/null || echo unknown)\"
-echo \"SQLITE_SIZE=\$(du -b /data/test.db 2>/dev/null | cut -f1 || echo 0)\"
-echo \"SQLITE_PID=\$(systemctl show -p MainPID sqlite-writer.service 2>/dev/null | cut -d= -f2 || echo none)\"
-echo \"SQLITE_GAPS_GT2=\$(python3 -c 'import sqlite3; c=sqlite3.connect(\"/data/test.db\"); rows=c.execute(\"SELECT timestamp FROM test ORDER BY rowid\").fetchall(); ts=[r[0] for r in rows]; gaps=[ts[i]-ts[i-1] for i in range(1,len(ts))]; print(sum(1 for g in gaps if g>2))' 2>/dev/null || echo -1)\"
-echo \"SQLITE_MAX_GAP=\$(python3 -c 'import sqlite3; c=sqlite3.connect(\"/data/test.db\"); rows=c.execute(\"SELECT timestamp FROM test ORDER BY rowid\").fetchall(); ts=[r[0] for r in rows]; gaps=[ts[i]-ts[i-1] for i in range(1,len(ts))]; print(max(gaps) if gaps else 0)' 2>/dev/null || echo -1)\"
-
-echo \"CRON_LINES=\$(wc -l < /data/test/cron.log 2>/dev/null || echo 0)\"
-echo \"CRON_LAST=\$(tail -1 /data/test/cron.log 2>/dev/null || echo none)\"
-echo \"CROND_STATUS=\$(systemctl is-active crond 2>/dev/null || echo inactive)\"
-echo \"CRONTAB_ENTRY=\$(crontab -l 2>/dev/null | head -1 || echo none)\"
-
-echo \"HTTP_STATUS=\$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080 2>/dev/null | awk '{printf \"%d\", \$1}' || echo 0)\"
-echo \"HTTP_PID=\$(systemctl show -p MainPID http-server.service 2>/dev/null | cut -d= -f2 || echo none)\"
-
-echo \"VM_HOSTNAME=\$(hostname)\"
-echo \"VM_IP_INTERNAL=\$(ip -4 addr show | grep 'inet ' | grep -v 127.0.0 | awk '{print \$2}' | head -1)\"
-echo \"VM_UPTIME=\$(cat /proc/uptime | awk '{print \$1}')\"
-echo \"DISK_TOTAL=\$(df -B1 / | tail -1 | awk '{print \$2}')\"
-echo \"DISK_USED=\$(df -B1 / | tail -1 | awk '{print \$3}')\"
-echo \"DISK_AVAIL=\$(df -B1 / | tail -1 | awk '{print \$4}')\"
-echo \"DATA_DIR_SIZE=\$(du -sb /data/test/ 2>/dev/null | cut -f1 || echo 0)\"
-
-echo \"LOG_FILE_SHA256=\$(sha256sum /data/test/log.txt 2>/dev/null | awk '{print \$1}' || echo none)\"
-echo \"LOG_FILE_SIZE=\$(stat -c%s /data/test/log.txt 2>/dev/null || echo 0)\"
-echo \"DB_FILE_SHA256=\$(sha256sum /data/test.db 2>/dev/null | awk '{print \$1}' || echo none)\"
-echo \"DB_FILE_SIZE=\$(stat -c%s /data/test.db 2>/dev/null || echo 0)\"
-echo \"LARGE_FILE_SIZE=\$(stat -c%s /data/large-file.bin 2>/dev/null || echo 0)\"
-echo \"LARGE_FILE_SHA256=\$(sha256sum /data/large-file.bin 2>/dev/null | awk '{print \$1}' || echo none)\"
-
-# Ephemeral disk (vda) data
-echo \"EPHEMERAL_FILE_WRITER_LINES=\$(wc -l < /var/lib/test-ephemeral/log.txt 2>/dev/null || echo 0)\"
-echo \"EPHEMERAL_FILE_WRITER_SIZE=\$(du -b /var/lib/test-ephemeral/log.txt 2>/dev/null | cut -f1 || echo 0)\"
-echo \"EPHEMERAL_FILE_WRITER_LAST=\$(tail -1 /var/lib/test-ephemeral/log.txt 2>/dev/null || echo none)\"
-echo \"EPHEMERAL_FILE_WRITER_PID=\$(pgrep -f 'test-ephemeral/log.txt' -o 2>/dev/null || echo none)\"
-
-echo \"EPHEMERAL_SQLITE_ROWS=\$(python3 -c 'import sqlite3; c=sqlite3.connect(\"/var/lib/test-ephemeral/test.db\"); print(c.execute(\"SELECT count(*) FROM test\").fetchone()[0])' 2>/dev/null || echo 0)\"
-echo \"EPHEMERAL_SQLITE_MAX_TS=\$(python3 -c 'import sqlite3; c=sqlite3.connect(\"/var/lib/test-ephemeral/test.db\"); print(c.execute(\"SELECT max(timestamp) FROM test\").fetchone()[0] or 0)' 2>/dev/null || echo 0)\"
-echo \"EPHEMERAL_SQLITE_MIN_TS=\$(python3 -c 'import sqlite3; c=sqlite3.connect(\"/var/lib/test-ephemeral/test.db\"); print(c.execute(\"SELECT min(timestamp) FROM test\").fetchone()[0] or 0)' 2>/dev/null || echo 0)\"
-echo \"EPHEMERAL_SQLITE_INTEGRITY=\$(python3 -c 'import sqlite3; c=sqlite3.connect(\"/var/lib/test-ephemeral/test.db\"); print(c.execute(\"PRAGMA integrity_check\").fetchone()[0])' 2>/dev/null || echo unknown)\"
-echo \"EPHEMERAL_SQLITE_SIZE=\$(du -b /var/lib/test-ephemeral/test.db 2>/dev/null | cut -f1 || echo 0)\"
-echo \"EPHEMERAL_SQLITE_PID=\$(pgrep -f 'sqlite-writer-ephemeral' -o 2>/dev/null || echo none)\"
-
-echo \"EPHEMERAL_DIR_SIZE=\$(du -sb /var/lib/test-ephemeral/ 2>/dev/null | cut -f1 || echo 0)\"
-echo \"EPHEMERAL_LARGE_FILE_SIZE=\$(stat -c%s /var/lib/test-ephemeral/large-file.bin 2>/dev/null || echo 0)\"
-echo \"EPHEMERAL_LARGE_FILE_SHA256=\$(sha256sum /var/lib/test-ephemeral/large-file.bin 2>/dev/null | awk '{print \$1}' || echo none)\"
-")
-
-task.pass "VM workload data collected"
+json_or_empty_object() {
+  echo "${1:-{}}" | jq -c . 2>/dev/null || echo '{}'
+}
 
 get_val() {
   local val
   val=$(echo "$VM_DATA" | grep "^${1}=" | head -1 | cut -d'=' -f2-)
+  if [[ -z "$val" ]]; then
+    log.debug "get_val: key '${1}' not found in VM_DATA, defaulting to 0"
+  fi
   echo "${val:-0}"
 }
 
-task.begin "Analyzing data gaps"
-log.verbose "Analyzing SQLite insert gaps (30s time windows)..."
-SQLITE_GAP_DATA=$(run_on_vm "python3 -c '
+service_status_from_pid() {
+  local pid="$1"
+  [[ "$pid" != "none" && "$pid" != "0" ]] && echo running || echo stopped
+}
+
+parse_pre_migration_sizes() {
+  PRE_LOG_FILE_SIZE=0
+  PRE_DB_FILE_SIZE=0
+  if [[ -n "$PRE_MIGRATION_FILE" && -f "$PRE_MIGRATION_FILE" ]]; then
+    PRE_LOG_FILE_SIZE=$(jq -r '.file_validation.persistent_vdc.log_size_bytes // 0' "$PRE_MIGRATION_FILE" 2>/dev/null || echo "0")
+    PRE_DB_FILE_SIZE=$(jq -r '.file_validation.persistent_vdc.db_size_bytes // 0' "$PRE_MIGRATION_FILE" 2>/dev/null || echo "0")
+  fi
+}
+
+collect_cluster_info() {
+  task.begin "Collecting cluster info"
+  CLUSTER_SERVER=$(executor_cluster_server "$CLUSTER_ROLE")
+  VM_STATUS=$(kubectl_target get vm "$VM_NAME" -n "$NAMESPACE" -o jsonpath='{.status.printableStatus}' 2>/dev/null || echo "unknown")
+  VM_NODE=$(kubectl_target get vmi "$VM_NAME" -n "$NAMESPACE" -o jsonpath='{.status.nodeName}' 2>/dev/null || echo "unknown")
+  VM_IP=$(kubectl_target get vmi "$VM_NAME" -n "$NAMESPACE" -o jsonpath='{.status.interfaces[0].ipAddress}' 2>/dev/null || echo "unknown")
+  task.pass "Cluster info collected"
+}
+
+emit_partial_report_and_exit() {
+  log.error "Post-migration SSH unreachable for ${VM_NAME} after ${SSH_READY_TIMEOUT}s"
+  jq -n \
+    --arg vm "$VM_NAME" \
+    --arg ns "$NAMESPACE" \
+    --arg ts "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+    --arg server "$CLUSTER_SERVER" \
+    --arg status "$VM_STATUS" \
+    --arg node "$VM_NODE" \
+    --arg ip "$VM_IP" \
+    --argjson timeout "$SSH_READY_TIMEOUT" \
+    '{
+      type: "post-migration",
+      vm_name: $vm,
+      namespace: $ns,
+      timestamp_utc: $ts,
+      ssh_reachable: false,
+      cluster: {server: $server, vm_status: $status, vm_node: $node, vm_pod_ip: $ip},
+      error: ("SSH unreachable after " + ($timeout | tostring) + "s"),
+      verdict: {overall: "FAIL", reason: "Cannot validate — VM not reachable via SSH"}
+    }' > "$OUTPUT_FILE"
+  echo "OVERALL_VERDICT=FAIL" > "${OUTPUT_FILE}.verdict"
+  exit 1
+}
+
+collect_vm_workload_data() {
+  task.begin "Collecting VM workload data"
+  VM_DATA=$(collect_vm_data "$PRE_LOG_FILE_SIZE" "$PRE_DB_FILE_SIZE")
+  task.pass "VM workload data collected"
+}
+
+validate_vm_data() {
+  if echo "$VM_DATA" | grep -q "^FILE_WRITER_LINES="; then
+    return 0
+  fi
+
+  log.error "VM data collection failed — no data returned from SSH"
+  jq -n \
+    --arg vm "$VM_NAME" \
+    --arg ns "$NAMESPACE" \
+    --arg ts "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+    --arg server "${CLUSTER_SERVER:-unknown}" \
+    --arg status "${VM_STATUS:-unknown}" \
+    --arg node "${VM_NODE:-unknown}" \
+    --arg ip "${VM_IP:-unknown}" \
+    '{
+      type: "post-migration",
+      vm_name: $vm,
+      namespace: $ns,
+      timestamp_utc: $ts,
+      ssh_reachable: true,
+      data_collection_failed: true,
+      cluster: {server: $server, vm_status: $status, vm_node: $node, vm_pod_ip: $ip},
+      error: "SSH connected but data collection returned no recognizable output",
+      verdict: {overall: "FAIL", reason: "Data collection failure"}
+    }' > "$OUTPUT_FILE"
+  echo "OVERALL_VERDICT=FAIL" > "${OUTPUT_FILE}.verdict"
+  exit 1
+}
+
+run_gap_analysis() {
+  task.begin "Analyzing data gaps"
+  log.verbose "Fetching all gap analysis data in single SSH call..."
+
+  local gap_raw
+  gap_raw=$(run_on_vm "
+echo '___SQLITE_GAP_START___'
+python3 -c '
 import sqlite3, json, datetime
 try:
     c = sqlite3.connect(\"/data/test.db\")
@@ -184,11 +249,55 @@ try:
                 status = \"affected\" if d[\"slow\"] >= 5 else \"jitter\"
                 result.append({\"time_window_utc\": datetime.datetime.utcfromtimestamp(b).strftime(\"%Y-%m-%d %H:%M:%S\"), \"epoch\": b, \"total_inserts\": d[\"total\"], \"slow_inserts\": d[\"slow\"], \"slow_pct\": pct, \"max_gap_sec\": d[\"max_gap\"], \"status\": status})
         print(json.dumps(result))
-except:
+except Exception:
     print(\"[]\")
-'" 2>/dev/null || echo "[]")
+' 2>/dev/null || echo '[]'
+echo '___SQLITE_GAP_END___'
+echo '___FILE_WRITER_START___'
+cat /data/test/log.txt 2>/dev/null
+echo '___FILE_WRITER_END___'
+echo '___EPHEMERAL_FW_START___'
+cat /var/lib/test-ephemeral/log.txt 2>/dev/null
+echo '___EPHEMERAL_FW_END___'
+echo '___CRON_START___'
+cat /data/test/cron.log 2>/dev/null
+echo '___CRON_END___'
+" 2>/dev/null || true)
 
-AFFECTED_WINDOWS=$(echo "$SQLITE_GAP_DATA" | python3 -c "
+  SQLITE_GAP_DATA=$(extract_gap_section "$gap_raw" "___SQLITE_GAP_START___" "___SQLITE_GAP_END___")
+  [[ -z "$SQLITE_GAP_DATA" ]] && SQLITE_GAP_DATA="[]"
+  SQLITE_GAP_DATA=$(json_or_empty_array "$SQLITE_GAP_DATA")
+
+  local fw_log eph_log cron_log
+  fw_log=$(extract_gap_section "$gap_raw" "___FILE_WRITER_START___" "___FILE_WRITER_END___")
+  eph_log=$(extract_gap_section "$gap_raw" "___EPHEMERAL_FW_START___" "___EPHEMERAL_FW_END___")
+  cron_log=$(extract_gap_section "$gap_raw" "___CRON_START___" "___CRON_END___")
+
+  log.verbose "Analyzing file-writer gaps (persistent /data/)..."
+  FILE_WRITER_GAP_DATA=$(echo "$fw_log" | python3 "${SCRIPT_DIR}/lib/gap-analyzer.py" \
+    --pattern '(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})' \
+    --format '%Y-%m-%dT%H:%M:%S' \
+    --expected-interval 1 \
+    --mode windows 2>/dev/null || echo "[]")
+  FILE_WRITER_GAP_DATA=$(json_or_empty_array "$FILE_WRITER_GAP_DATA")
+
+  log.verbose "Analyzing ephemeral file-writer gaps (/var/lib/test-ephemeral/)..."
+  EPHEMERAL_FILE_WRITER_GAP_DATA=$(echo "$eph_log" | python3 "${SCRIPT_DIR}/lib/gap-analyzer.py" \
+    --pattern '(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})' \
+    --format '%Y-%m-%dT%H:%M:%S' \
+    --expected-interval 1 \
+    --mode windows 2>/dev/null || echo "[]")
+  EPHEMERAL_FILE_WRITER_GAP_DATA=$(json_or_empty_array "$EPHEMERAL_FILE_WRITER_GAP_DATA")
+
+  log.verbose "Analyzing cron job gaps..."
+  CRON_GAP_DATA=$(echo "$cron_log" | python3 "${SCRIPT_DIR}/lib/gap-analyzer.py" \
+    --pattern 'at (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})' \
+    --format '%Y-%m-%dT%H:%M:%S' \
+    --expected-interval 60 \
+    --mode gaps 2>/dev/null || echo "[]")
+  CRON_GAP_DATA=$(json_or_empty_array "$CRON_GAP_DATA")
+
+  AFFECTED_WINDOWS=$(echo "$SQLITE_GAP_DATA" | python3 -c "
 import json, sys
 try:
     data = json.load(sys.stdin)
@@ -207,554 +316,477 @@ try:
         }))
     else:
         print(json.dumps({'affected_from_utc': 'none', 'affected_to_utc': 'none', 'duration_sec': 0, 'total_affected_windows': 0, 'total_slow_inserts_in_window': 0, 'total_inserts_in_window': 0, 'avg_slow_pct': 0}))
-except:
+except Exception:
     print(json.dumps({'affected_from_utc': 'none', 'affected_to_utc': 'none', 'duration_sec': 0, 'total_affected_windows': 0, 'total_slow_inserts_in_window': 0, 'total_inserts_in_window': 0, 'avg_slow_pct': 0}))
 " 2>/dev/null || echo '{"affected_from_utc":"none","affected_to_utc":"none","duration_sec":0,"total_affected_windows":0,"total_slow_inserts_in_window":0,"total_inserts_in_window":0,"avg_slow_pct":0}')
+  AFFECTED_WINDOWS=$(json_or_empty_object "$AFFECTED_WINDOWS")
 
-JITTER_COUNT=$(echo "$SQLITE_GAP_DATA" | python3 -c "
+  JITTER_COUNT=$(echo "$SQLITE_GAP_DATA" | python3 -c "
 import json, sys
 try:
     data = json.load(sys.stdin)
     print(len([r for r in data if r.get('status') == 'jitter']))
-except:
+except Exception:
     print(0)
 " 2>/dev/null || echo "0")
 
-log.verbose "Analyzing file-writer gaps (persistent /data/)..."
-FILE_WRITER_GAP_DATA=$(run_on_vm "cat /data/test/log.txt 2>/dev/null | python3 -c \"
-import sys, json, re
-from datetime import datetime
+  task.pass "Gap analysis complete"
+}
 
-lines = sys.stdin.readlines()
-if not lines:
-    print('[]')
-    sys.exit(0)
+load_pre_migration_baseline() {
+  HAS_PRE="false"
+  if [[ -z "$PRE_MIGRATION_FILE" || ! -f "$PRE_MIGRATION_FILE" ]]; then
+    return 0
+  fi
 
-# Parse timestamps and convert to epoch
-entries = []
-for line in lines:
-    # Format: 'Mon Mar 31 12:34:56 UTC 2026 - writing test data'
-    match = re.match(r'(\w{3} \w{3} +\d+ \d+:\d+:\d+ UTC \d{4})', line)
-    if match:
-        try:
-            ts_str = match.group(1)
-            dt = datetime.strptime(ts_str, '%a %b %d %H:%M:%S UTC %Y')
-            epoch = int(dt.timestamp())
-            entries.append(epoch)
-        except:
-            continue
-
-if len(entries) < 2:
-    print('[]')
-    sys.exit(0)
-
-# Calculate gaps and bucket into 30s windows
-buckets = {}
-for i in range(1, len(entries)):
-    gap = entries[i] - entries[i-1]
-    bucket_ts = (entries[i] // 30) * 30
-
-    if bucket_ts not in buckets:
-        buckets[bucket_ts] = {'total': 0, 'slow': 0, 'max_gap': 0}
-
-    buckets[bucket_ts]['total'] += 1
-    if gap > 1:  # Expected interval is 1 second
-        buckets[bucket_ts]['slow'] += 1
-    if gap > buckets[bucket_ts]['max_gap']:
-        buckets[bucket_ts]['max_gap'] = gap
-
-# Build output
-result = []
-for bucket_ts in sorted(buckets.keys()):
-    b = buckets[bucket_ts]
-    if b['slow'] > 0:  # Only include windows with gaps
-        slow_pct = round(b['slow'] * 100.0 / b['total'], 1) if b['total'] > 0 else 0
-        status = 'affected' if b['slow'] >= 5 else 'jitter'
-        result.append({
-            'time_window_utc': datetime.utcfromtimestamp(bucket_ts).strftime('%Y-%m-%d %H:%M:%S'),
-            'epoch': bucket_ts,
-            'total_writes': b['total'],
-            'slow_writes': b['slow'],
-            'slow_pct': slow_pct,
-            'max_gap_sec': b['max_gap'],
-            'status': status
-        })
-
-print(json.dumps(result))
-\"" 2>/dev/null || echo "[]")
-
-log.verbose "Analyzing ephemeral file-writer gaps (/var/lib/test-ephemeral/)..."
-EPHEMERAL_FILE_WRITER_GAP_DATA=$(run_on_vm "cat /var/lib/test-ephemeral/log.txt 2>/dev/null | python3 -c \"
-import sys, json, re
-from datetime import datetime
-
-lines = sys.stdin.readlines()
-if not lines:
-    print('[]')
-    sys.exit(0)
-
-entries = []
-for line in lines:
-    match = re.match(r'(\w{3} \w{3} +\d+ \d+:\d+:\d+ UTC \d{4})', line)
-    if match:
-        try:
-            ts_str = match.group(1)
-            dt = datetime.strptime(ts_str, '%a %b %d %H:%M:%S UTC %Y')
-            epoch = int(dt.timestamp())
-            entries.append(epoch)
-        except:
-            continue
-
-if len(entries) < 2:
-    print('[]')
-    sys.exit(0)
-
-buckets = {}
-for i in range(1, len(entries)):
-    gap = entries[i] - entries[i-1]
-    bucket_ts = (entries[i] // 30) * 30
-
-    if bucket_ts not in buckets:
-        buckets[bucket_ts] = {'total': 0, 'slow': 0, 'max_gap': 0}
-
-    buckets[bucket_ts]['total'] += 1
-    if gap > 1:
-        buckets[bucket_ts]['slow'] += 1
-    if gap > buckets[bucket_ts]['max_gap']:
-        buckets[bucket_ts]['max_gap'] = gap
-
-result = []
-for bucket_ts in sorted(buckets.keys()):
-    b = buckets[bucket_ts]
-    if b['slow'] > 0:
-        slow_pct = round(b['slow'] * 100.0 / b['total'], 1) if b['total'] > 0 else 0
-        status = 'affected' if b['slow'] >= 5 else 'jitter'
-        result.append({
-            'time_window_utc': datetime.utcfromtimestamp(bucket_ts).strftime('%Y-%m-%d %H:%M:%S'),
-            'epoch': bucket_ts,
-            'total_writes': b['total'],
-            'slow_writes': b['slow'],
-            'slow_pct': slow_pct,
-            'max_gap_sec': b['max_gap'],
-            'status': status
-        })
-
-print(json.dumps(result))
-\"" 2>/dev/null || echo "[]")
-
-log.verbose "Analyzing cron job gaps..."
-CRON_GAP_DATA=$(run_on_vm "cat /data/test/cron.log 2>/dev/null | python3 -c \"
-import sys, json, re
-from datetime import datetime
-
-lines = sys.stdin.readlines()
-if not lines:
-    print('[]')
-    sys.exit(0)
-
-entries = []
-for line in lines:
-    # Format: 'cron ran at Mon Mar 31 12:34:00 UTC 2026'
-    match = re.search(r'at (\w{3} \w{3} +\d+ \d+:\d+:\d+ UTC \d{4})', line)
-    if match:
-        try:
-            ts_str = match.group(1)
-            dt = datetime.strptime(ts_str, '%a %b %d %H:%M:%S UTC %Y')
-            epoch = int(dt.timestamp())
-            entries.append(epoch)
-        except:
-            continue
-
-if len(entries) < 2:
-    print('[]')
-    sys.exit(0)
-
-# Calculate gaps (expected: 60 seconds)
-gaps = []
-for i in range(1, len(entries)):
-    gap = entries[i] - entries[i-1]
-    if gap > 60:  # Missing cron execution
-        gaps.append({
-            'from_time_utc': datetime.utcfromtimestamp(entries[i-1]).strftime('%Y-%m-%d %H:%M:%S'),
-            'to_time_utc': datetime.utcfromtimestamp(entries[i]).strftime('%Y-%m-%d %H:%M:%S'),
-            'gap_seconds': gap,
-            'missing_executions': max(0, (gap // 60) - 1)
-        })
-
-print(json.dumps(gaps))
-\"" 2>/dev/null || echo "[]")
-
-# --- Load pre-migration data if provided ---
-PRE_FILE_WRITER_LINES=0
-PRE_SQLITE_ROWS=0
-PRE_CRON_LINES=0
-PRE_FILE_WRITER_PID="unknown"
-PRE_SQLITE_PID="unknown"
-PRE_HTTP_PID="unknown"
-PRE_HOSTNAME="unknown"
-PRE_CLUSTER_SERVER="unknown"
-PRE_LARGE_FILE_SHA256="none"
-PRE_LARGE_FILE_SIZE=0
-PRE_LOG_FILE_SHA256="none"
-PRE_LOG_FILE_SIZE=0
-PRE_DB_FILE_SHA256="none"
-PRE_DB_FILE_SIZE=0
-
-PRE_EPHEMERAL_FILE_WRITER_LINES=0
-PRE_EPHEMERAL_SQLITE_ROWS=0
-PRE_EPHEMERAL_FILE_WRITER_PID="unknown"
-PRE_EPHEMERAL_SQLITE_PID="unknown"
-PRE_EPHEMERAL_LARGE_FILE_SHA256="none"
-PRE_EPHEMERAL_LARGE_FILE_SIZE=0
-
-HAS_PRE="false"
-if [[ -n "$PRE_MIGRATION_FILE" && -f "$PRE_MIGRATION_FILE" ]]; then
   HAS_PRE="true"
   log.verbose "Loading pre-migration baseline from: ${PRE_MIGRATION_FILE}"
 
-  # Parse pre-migration JSON (using python3 if available, fallback to grep)
-  if command -v python3 &>/dev/null; then
-    # Persistent (vdc) data - handle both old and new JSON structure
-    PRE_FILE_WRITER_LINES=$(python3 -c "import json; d=json.load(open('${PRE_MIGRATION_FILE}')); print(d.get('workloads', {}).get('persistent_vdc', d.get('workloads', {})).get('file_writer', {}).get('line_count', 0))" 2>/dev/null || echo "0")
-    PRE_SQLITE_ROWS=$(python3 -c "import json; d=json.load(open('${PRE_MIGRATION_FILE}')); print(d.get('workloads', {}).get('persistent_vdc', d.get('workloads', {})).get('sqlite_writer', {}).get('row_count', 0))" 2>/dev/null || echo "0")
-    PRE_CRON_LINES=$(python3 -c "import json; d=json.load(open('${PRE_MIGRATION_FILE}')); print(d.get('workloads', {}).get('persistent_vdc', d.get('workloads', {})).get('cron_job', {}).get('log_line_count', 0))" 2>/dev/null || echo "0")
-    PRE_FILE_WRITER_PID=$(python3 -c "import json; d=json.load(open('${PRE_MIGRATION_FILE}')); print(d.get('workloads', {}).get('persistent_vdc', d.get('workloads', {})).get('file_writer', {}).get('pid', 'unknown'))" 2>/dev/null || echo "unknown")
-    PRE_SQLITE_PID=$(python3 -c "import json; d=json.load(open('${PRE_MIGRATION_FILE}')); print(d.get('workloads', {}).get('persistent_vdc', d.get('workloads', {})).get('sqlite_writer', {}).get('pid', 'unknown'))" 2>/dev/null || echo "unknown")
-    PRE_HTTP_PID=$(python3 -c "import json; d=json.load(open('${PRE_MIGRATION_FILE}')); print(d.get('workloads', {}).get('persistent_vdc', d.get('workloads', {})).get('http_server', {}).get('pid', 'unknown'))" 2>/dev/null || echo "unknown")
-    PRE_HOSTNAME=$(python3 -c "import json; d=json.load(open('${PRE_MIGRATION_FILE}')); print(d['vm_info']['hostname'])")
-    PRE_CLUSTER_SERVER=$(python3 -c "import json; d=json.load(open('${PRE_MIGRATION_FILE}')); print(d['cluster']['server'])")
-    PRE_LARGE_FILE_SHA256=$(python3 -c "import json; d=json.load(open('${PRE_MIGRATION_FILE}')); print(d.get('large_data_validation', d.get('large_data', {})).get('persistent_vdc', d.get('large_data_validation', d.get('large_data', {}))).get('sha256', 'none'))" 2>/dev/null || echo "none")
-    PRE_LARGE_FILE_SIZE=$(python3 -c "import json; d=json.load(open('${PRE_MIGRATION_FILE}')); print(d.get('large_data_validation', d.get('large_data', {})).get('persistent_vdc', d.get('large_data_validation', d.get('large_data', {}))).get('file_size_bytes', 0))" 2>/dev/null || echo "0")
-    PRE_LOG_FILE_SHA256=$(python3 -c "import json; d=json.load(open('${PRE_MIGRATION_FILE}')); print(d.get('file_validation', {}).get('persistent_vdc', {}).get('log_sha256', 'none'))" 2>/dev/null || echo "none")
-    PRE_LOG_FILE_SIZE=$(python3 -c "import json; d=json.load(open('${PRE_MIGRATION_FILE}')); print(d.get('file_validation', {}).get('persistent_vdc', {}).get('log_size_bytes', 0))" 2>/dev/null || echo "0")
-    PRE_DB_FILE_SHA256=$(python3 -c "import json; d=json.load(open('${PRE_MIGRATION_FILE}')); print(d.get('file_validation', {}).get('persistent_vdc', {}).get('db_sha256', 'none'))" 2>/dev/null || echo "none")
-    PRE_DB_FILE_SIZE=$(python3 -c "import json; d=json.load(open('${PRE_MIGRATION_FILE}')); print(d.get('file_validation', {}).get('persistent_vdc', {}).get('db_size_bytes', 0))" 2>/dev/null || echo "0")
-
-    # Ephemeral (vda) data
-    PRE_EPHEMERAL_FILE_WRITER_LINES=$(python3 -c "import json; d=json.load(open('${PRE_MIGRATION_FILE}')); print(d.get('workloads', {}).get('ephemeral_vda', {}).get('file_writer', {}).get('line_count', 0))" 2>/dev/null || echo "0")
-    PRE_EPHEMERAL_SQLITE_ROWS=$(python3 -c "import json; d=json.load(open('${PRE_MIGRATION_FILE}')); print(d.get('workloads', {}).get('ephemeral_vda', {}).get('sqlite_writer', {}).get('row_count', 0))" 2>/dev/null || echo "0")
-    PRE_EPHEMERAL_FILE_WRITER_PID=$(python3 -c "import json; d=json.load(open('${PRE_MIGRATION_FILE}')); print(d.get('workloads', {}).get('ephemeral_vda', {}).get('file_writer', {}).get('pid', 'unknown'))" 2>/dev/null || echo "unknown")
-    PRE_EPHEMERAL_SQLITE_PID=$(python3 -c "import json; d=json.load(open('${PRE_MIGRATION_FILE}')); print(d.get('workloads', {}).get('ephemeral_vda', {}).get('sqlite_writer', {}).get('pid', 'unknown'))" 2>/dev/null || echo "unknown")
-    PRE_EPHEMERAL_LARGE_FILE_SHA256=$(python3 -c "import json; d=json.load(open('${PRE_MIGRATION_FILE}')); print(d.get('large_data_validation', {}).get('ephemeral_vda', {}).get('sha256', 'none'))" 2>/dev/null || echo "none")
-    PRE_EPHEMERAL_LARGE_FILE_SIZE=$(python3 -c "import json; d=json.load(open('${PRE_MIGRATION_FILE}')); print(d.get('large_data_validation', {}).get('ephemeral_vda', {}).get('file_size_bytes', 0))" 2>/dev/null || echo "0")
+  if ! command -v python3 &>/dev/null; then
+    return 0
   fi
-fi
 
-# --- Compute comparison ---
-POST_FILE_WRITER_LINES=$(get_val FILE_WRITER_LINES)
-POST_SQLITE_ROWS=$(get_val SQLITE_ROWS)
-POST_CRON_LINES=$(get_val CRON_LINES)
+  eval "$(python3 - "$PRE_MIGRATION_FILE" <<'PYEOF'
+import json, shlex, sys
 
-FILE_WRITER_DIFF=$((POST_FILE_WRITER_LINES - PRE_FILE_WRITER_LINES))
-SQLITE_DIFF=$((POST_SQLITE_ROWS - PRE_SQLITE_ROWS))
-CRON_DIFF=$((POST_CRON_LINES - PRE_CRON_LINES))
+path = sys.argv[1]
+with open(path) as f:
+    d = json.load(f)
 
-FILE_WRITER_PID_MATCH="unknown"
-SQLITE_PID_MATCH="unknown"
-HTTP_PID_MATCH="unknown"
-if [[ "$HAS_PRE" == "true" ]]; then
-  FILE_WRITER_PID_MATCH=$( [ "$(get_val FILE_WRITER_PID)" == "$PRE_FILE_WRITER_PID" ] && echo "same" || echo "changed" )
-  SQLITE_PID_MATCH=$( [ "$(get_val SQLITE_PID)" == "$PRE_SQLITE_PID" ] && echo "same" || echo "changed" )
-  HTTP_PID_MATCH=$( [ "$(get_val HTTP_PID)" == "$PRE_HTTP_PID" ] && echo "same" || echo "changed" )
-fi
+w = d.get("workloads", {})
+p = w.get("persistent_vdc", w)
+e = w.get("ephemeral_vda", {})
+fv = d.get("file_validation", {}).get("persistent_vdc", {})
+lv = d.get("large_data_validation", d.get("large_data", {}))
+lv_p = lv.get("persistent_vdc", lv) if isinstance(lv, dict) else {}
+lv_e = lv.get("ephemeral_vda", {}) if isinstance(lv, dict) else {}
 
-# Determine migration type from PID behavior
-MIGRATION_TYPE="unknown"
-if [[ "$HAS_PRE" == "true" ]]; then
-  PID_SAME_COUNT=0
-  PID_TOTAL_COUNT=3
-  [[ "$FILE_WRITER_PID_MATCH" == "same" ]] && PID_SAME_COUNT=$((PID_SAME_COUNT + 1))
-  [[ "$SQLITE_PID_MATCH" == "same" ]] && PID_SAME_COUNT=$((PID_SAME_COUNT + 1))
-  [[ "$HTTP_PID_MATCH" == "same" ]] && PID_SAME_COUNT=$((PID_SAME_COUNT + 1))
-  if [[ "$PID_SAME_COUNT" -ge 2 ]]; then
-    MIGRATION_TYPE="live (memory preserved, ${PID_SAME_COUNT}/${PID_TOTAL_COUNT} PIDs same)"
-  else
-    MIGRATION_TYPE="cold (VM rebooted, new PIDs)"
-  fi
-fi
+def emit(name, value):
+    print(f"{name}={shlex.quote(str(value))}")
 
-# --- Ephemeral disk comparisons ---
-POST_EPHEMERAL_FILE_WRITER_LINES=$(get_val EPHEMERAL_FILE_WRITER_LINES)
-POST_EPHEMERAL_SQLITE_ROWS=$(get_val EPHEMERAL_SQLITE_ROWS)
+emit("PRE_FILE_WRITER_LINES", p.get("file_writer", {}).get("line_count", 0))
+emit("PRE_SQLITE_ROWS", p.get("sqlite_writer", {}).get("row_count", 0))
+emit("PRE_CRON_LINES", p.get("cron_job", {}).get("log_line_count", 0))
+emit("PRE_FILE_WRITER_PID", p.get("file_writer", {}).get("pid", "unknown"))
+emit("PRE_SQLITE_PID", p.get("sqlite_writer", {}).get("pid", "unknown"))
+emit("PRE_HTTP_PID", p.get("http_server", {}).get("pid", "unknown"))
+emit("PRE_HOSTNAME", d.get("vm_info", {}).get("hostname", "unknown"))
+emit("PRE_CLUSTER_SERVER", d.get("cluster", {}).get("server", "unknown"))
+emit("PRE_LARGE_FILE_SHA256", lv_p.get("sha256", "none"))
+emit("PRE_LARGE_FILE_SIZE", lv_p.get("file_size_bytes", 0))
+emit("PRE_LOG_FILE_SHA256", fv.get("log_sha256", "none"))
+emit("PRE_LOG_FILE_SIZE", fv.get("log_size_bytes", 0))
+emit("PRE_DB_FILE_SHA256", fv.get("db_sha256", "none"))
+emit("PRE_DB_FILE_SIZE", fv.get("db_size_bytes", 0))
+emit("PRE_EPHEMERAL_FILE_WRITER_LINES", e.get("file_writer", {}).get("line_count", 0))
+emit("PRE_EPHEMERAL_SQLITE_ROWS", e.get("sqlite_writer", {}).get("row_count", 0))
+emit("PRE_EPHEMERAL_FILE_WRITER_PID", e.get("file_writer", {}).get("pid", "unknown"))
+emit("PRE_EPHEMERAL_SQLITE_PID", e.get("sqlite_writer", {}).get("pid", "unknown"))
+emit("PRE_EPHEMERAL_LARGE_FILE_SHA256", lv_e.get("sha256", "none"))
+emit("PRE_EPHEMERAL_LARGE_FILE_SIZE", lv_e.get("file_size_bytes", 0))
+emit("PRE_CROND_STATUS", p.get("cron_job", {}).get("crond_status", "unknown"))
+PYEOF
+)"
+}
 
-EPHEMERAL_FILE_WRITER_DIFF=$((POST_EPHEMERAL_FILE_WRITER_LINES - PRE_EPHEMERAL_FILE_WRITER_LINES))
-EPHEMERAL_SQLITE_DIFF=$((POST_EPHEMERAL_SQLITE_ROWS - PRE_EPHEMERAL_SQLITE_ROWS))
+compute_comparisons() {
+  POST_FILE_WRITER_LINES=$(get_val FILE_WRITER_LINES)
+  POST_SQLITE_ROWS=$(get_val SQLITE_ROWS)
+  POST_CRON_LINES=$(get_val CRON_LINES)
+  POST_EPHEMERAL_FILE_WRITER_LINES=$(get_val EPHEMERAL_FILE_WRITER_LINES)
+  POST_EPHEMERAL_SQLITE_ROWS=$(get_val EPHEMERAL_SQLITE_ROWS)
 
-EPHEMERAL_FILE_WRITER_PID_MATCH="unknown"
-EPHEMERAL_SQLITE_PID_MATCH="unknown"
-if [[ "$HAS_PRE" == "true" ]]; then
-  EPHEMERAL_FILE_WRITER_PID_MATCH=$( [ "$(get_val EPHEMERAL_FILE_WRITER_PID)" == "$PRE_EPHEMERAL_FILE_WRITER_PID" ] && echo "same" || echo "changed" )
-  EPHEMERAL_SQLITE_PID_MATCH=$( [ "$(get_val EPHEMERAL_SQLITE_PID)" == "$PRE_EPHEMERAL_SQLITE_PID" ] && echo "same" || echo "changed" )
-fi
+  FILE_WRITER_DIFF=$((POST_FILE_WRITER_LINES - PRE_FILE_WRITER_LINES))
+  SQLITE_DIFF=$((POST_SQLITE_ROWS - PRE_SQLITE_ROWS))
+  CRON_DIFF=$((POST_CRON_LINES - PRE_CRON_LINES))
+  EPHEMERAL_FILE_WRITER_DIFF=$((POST_EPHEMERAL_FILE_WRITER_LINES - PRE_EPHEMERAL_FILE_WRITER_LINES))
+  EPHEMERAL_SQLITE_DIFF=$((POST_EPHEMERAL_SQLITE_ROWS - PRE_EPHEMERAL_SQLITE_ROWS))
 
-# --- Large file SHA validation (persistent) ---
-POST_LARGE_FILE_SHA256="$(get_val LARGE_FILE_SHA256)"
-POST_LARGE_FILE_SIZE="$(get_val LARGE_FILE_SIZE)"
+  FILE_WRITER_PID_MATCH="unknown"
+  SQLITE_PID_MATCH="unknown"
+  HTTP_PID_MATCH="unknown"
+  EPHEMERAL_FILE_WRITER_PID_MATCH="unknown"
+  EPHEMERAL_SQLITE_PID_MATCH="unknown"
+  MIGRATION_TYPE="unknown"
 
-LARGE_DATA_INTACT="false"
-if [[ "$PRE_LARGE_FILE_SHA256" != "none" ]] && [[ "$POST_LARGE_FILE_SHA256" != "none" ]]; then
-  if [[ "$PRE_LARGE_FILE_SHA256" == "$POST_LARGE_FILE_SHA256" ]]; then
-    LARGE_DATA_INTACT="true"
-  fi
-fi
+  if [[ "$HAS_PRE" == "true" ]]; then
+    FILE_WRITER_PID_MATCH=$( [ "$(get_val FILE_WRITER_PID)" == "$PRE_FILE_WRITER_PID" ] && echo "same" || echo "changed" )
+    SQLITE_PID_MATCH=$( [ "$(get_val SQLITE_PID)" == "$PRE_SQLITE_PID" ] && echo "same" || echo "changed" )
+    HTTP_PID_MATCH=$( [ "$(get_val HTTP_PID)" == "$PRE_HTTP_PID" ] && echo "same" || echo "changed" )
+    EPHEMERAL_FILE_WRITER_PID_MATCH=$( [ "$(get_val EPHEMERAL_FILE_WRITER_PID)" == "$PRE_EPHEMERAL_FILE_WRITER_PID" ] && echo "same" || echo "changed" )
+    EPHEMERAL_SQLITE_PID_MATCH=$( [ "$(get_val EPHEMERAL_SQLITE_PID)" == "$PRE_EPHEMERAL_SQLITE_PID" ] && echo "same" || echo "changed" )
 
-POST_LOG_FILE_SHA256="$(get_val LOG_FILE_SHA256)"
-POST_LOG_FILE_SIZE="$(get_val LOG_FILE_SIZE)"
-POST_DB_FILE_SHA256="$(get_val DB_FILE_SHA256)"
-POST_DB_FILE_SIZE="$(get_val DB_FILE_SIZE)"
-
-LOG_FILE_INTACT="false"
-if [[ "$HAS_PRE" == "true" ]] && [[ "$PRE_LOG_FILE_SHA256" != "none" ]] && [[ "$PRE_LOG_FILE_SIZE" -gt 0 ]]; then
-  if [[ "$POST_LOG_FILE_SIZE" -ge "$PRE_LOG_FILE_SIZE" ]]; then
-    PREFIX_SHA=$(run_on_vm "head -c ${PRE_LOG_FILE_SIZE} /data/test/log.txt 2>/dev/null | sha256sum | awk '{print \$1}'" 2>/dev/null || echo "none")
-    if [[ "$PREFIX_SHA" == "$PRE_LOG_FILE_SHA256" ]]; then
-      LOG_FILE_INTACT="true"
+    local pid_same_count=0
+    [[ "$FILE_WRITER_PID_MATCH" == "same" ]] && pid_same_count=$((pid_same_count + 1))
+    [[ "$SQLITE_PID_MATCH" == "same" ]] && pid_same_count=$((pid_same_count + 1))
+    [[ "$HTTP_PID_MATCH" == "same" ]] && pid_same_count=$((pid_same_count + 1))
+    if [[ "$pid_same_count" -ge 2 ]]; then
+      MIGRATION_TYPE="live (memory preserved, ${pid_same_count}/3 PIDs same)"
+    else
+      MIGRATION_TYPE="cold (VM rebooted, new PIDs)"
     fi
   fi
-fi
 
-DB_FILE_INTACT="false"
-if [[ "$HAS_PRE" == "true" ]] && [[ "$PRE_DB_FILE_SHA256" != "none" ]] && [[ "$PRE_DB_FILE_SIZE" -gt 0 ]]; then
-  if [[ "$POST_DB_FILE_SIZE" -ge "$PRE_DB_FILE_SIZE" ]]; then
-    PREFIX_DB_SHA=$(run_on_vm "head -c ${PRE_DB_FILE_SIZE} /data/test.db 2>/dev/null | sha256sum | awk '{print \$1}'" 2>/dev/null || echo "none")
-    if [[ "$PREFIX_DB_SHA" == "$PRE_DB_FILE_SHA256" ]]; then
-      DB_FILE_INTACT="true"
+  POST_LARGE_FILE_SHA256="$(get_val LARGE_FILE_SHA256)"
+  POST_LARGE_FILE_SIZE="$(get_val LARGE_FILE_SIZE)"
+  LARGE_DATA_INTACT="false"
+  if [[ "$PRE_LARGE_FILE_SHA256" != "none" ]] && [[ "$POST_LARGE_FILE_SHA256" != "none" ]]; then
+    [[ "$PRE_LARGE_FILE_SHA256" == "$POST_LARGE_FILE_SHA256" ]] && LARGE_DATA_INTACT="true"
+  fi
+
+  POST_LOG_FILE_SHA256="$(get_val LOG_FILE_SHA256)"
+  POST_LOG_FILE_SIZE="$(get_val LOG_FILE_SIZE)"
+  POST_DB_FILE_SHA256="$(get_val DB_FILE_SHA256)"
+  POST_DB_FILE_SIZE="$(get_val DB_FILE_SIZE)"
+
+  LOG_FILE_INTACT="false"
+  if [[ "$HAS_PRE" == "true" ]] && [[ "$PRE_LOG_FILE_SHA256" != "none" ]] && [[ "$PRE_LOG_FILE_SIZE" -gt 0 ]]; then
+    if [[ "$POST_LOG_FILE_SIZE" -ge "$PRE_LOG_FILE_SIZE" ]]; then
+      local prefix_sha
+      prefix_sha="$(get_val PREFIX_LOG_SHA)"
+      [[ "$prefix_sha" == "$PRE_LOG_FILE_SHA256" ]] && LOG_FILE_INTACT="true"
     fi
   fi
-fi
 
-# --- Large file SHA validation (ephemeral) ---
-POST_EPHEMERAL_LARGE_FILE_SHA256="$(get_val EPHEMERAL_LARGE_FILE_SHA256)"
-POST_EPHEMERAL_LARGE_FILE_SIZE="$(get_val EPHEMERAL_LARGE_FILE_SIZE)"
-
-EPHEMERAL_DATA_INTACT="false"
-if [[ "$PRE_EPHEMERAL_LARGE_FILE_SHA256" != "none" ]] && [[ "$POST_EPHEMERAL_LARGE_FILE_SHA256" != "none" ]]; then
-  if [[ "$PRE_EPHEMERAL_LARGE_FILE_SHA256" == "$POST_EPHEMERAL_LARGE_FILE_SHA256" ]]; then
-    EPHEMERAL_DATA_INTACT="true"
+  DB_FILE_INTACT="false"
+  if [[ "$HAS_PRE" == "true" ]] && [[ "$PRE_DB_FILE_SHA256" != "none" ]] && [[ "$PRE_DB_FILE_SIZE" -gt 0 ]]; then
+    if [[ "$POST_DB_FILE_SIZE" -ge "$PRE_DB_FILE_SIZE" ]]; then
+      local prefix_db_sha
+      prefix_db_sha="$(get_val PREFIX_DB_SHA)"
+      [[ "$prefix_db_sha" == "$PRE_DB_FILE_SHA256" ]] && DB_FILE_INTACT="true"
+    fi
   fi
-fi
 
-task.pass "Gap analysis complete"
+  POST_EPHEMERAL_LARGE_FILE_SHA256="$(get_val EPHEMERAL_LARGE_FILE_SHA256)"
+  POST_EPHEMERAL_LARGE_FILE_SIZE="$(get_val EPHEMERAL_LARGE_FILE_SIZE)"
+  EPHEMERAL_DATA_INTACT="false"
+  if [[ "$PRE_EPHEMERAL_LARGE_FILE_SHA256" != "none" ]] && [[ "$POST_EPHEMERAL_LARGE_FILE_SHA256" != "none" ]]; then
+    [[ "$PRE_EPHEMERAL_LARGE_FILE_SHA256" == "$POST_EPHEMERAL_LARGE_FILE_SHA256" ]] && EPHEMERAL_DATA_INTACT="true"
+  fi
+}
 
-task.begin "Building JSON report"
+build_report_json() {
+  task.begin "Building JSON report"
 
-cat > "$OUTPUT_FILE" << JSONEOF
-{
-  "type": "post-migration",
-  "vm_name": "${VM_NAME}",
-  "namespace": "${NAMESPACE}",
-  "chaos_scenario": "${CHAOS_SCENARIO}",
-  "timestamp_utc": "$(get_val CAPTURE_TIME_UTC)",
-  "timestamp_local": "$(get_val CAPTURE_TIME_LOCAL)",
-  "cluster": {
-    "server": "${CLUSTER_SERVER}",
-    "vm_status": "${VM_STATUS}",
-    "vm_node": "${VM_NODE}",
-    "vm_pod_ip": "${VM_IP}"
-  },
-  "workloads": {
-    "persistent_vdc": {
-      "mount_point": "/data",
-      "device": "/dev/vdc",
-      "file_writer": {
-        "status": "$([ "$(get_val FILE_WRITER_PID)" != "none" ] && echo running || echo stopped)",
-        "pid": "$(get_val FILE_WRITER_PID)",
-        "file": "/data/test/log.txt",
-        "line_count": ${POST_FILE_WRITER_LINES},
-        "file_size_bytes": $(get_val FILE_WRITER_SIZE),
-        "last_entry": "$(get_val FILE_WRITER_LAST)",
-        "write_interval_sec": 1,
-        "gap_analysis": ${FILE_WRITER_GAP_DATA:-[]}
+  local fw_status sqlite_status http_status eph_fw_status eph_sqlite_status
+  fw_status=$(service_status_from_pid "$(get_val FILE_WRITER_PID)")
+  sqlite_status=$(service_status_from_pid "$(get_val SQLITE_PID)")
+  http_status=$(service_status_from_pid "$(get_val HTTP_PID)")
+  eph_fw_status=$(service_status_from_pid "$(get_val EPHEMERAL_FILE_WRITER_PID)")
+  eph_sqlite_status=$(service_status_from_pid "$(get_val EPHEMERAL_SQLITE_PID)")
+
+  local has_pre_json large_intact_json eph_large_intact_json
+  has_pre_json=$(bool_json "$HAS_PRE")
+  large_intact_json=$(bool_json "$LARGE_DATA_INTACT")
+  eph_large_intact_json=$(bool_json "$EPHEMERAL_DATA_INTACT")
+
+  jq -n \
+    --arg type "post-migration" \
+    --arg vm_name "$VM_NAME" \
+    --arg namespace "$NAMESPACE" \
+    --arg chaos_scenario "$CHAOS_SCENARIO" \
+    --arg timestamp_utc "$(get_val CAPTURE_TIME_UTC)" \
+    --arg timestamp_local "$(get_val CAPTURE_TIME_LOCAL)" \
+    --arg cluster_server "$CLUSTER_SERVER" \
+    --arg vm_status "$VM_STATUS" \
+    --arg vm_node "$VM_NODE" \
+    --arg vm_pod_ip "$VM_IP" \
+    --arg fw_status "$fw_status" \
+    --arg fw_pid "$(get_val FILE_WRITER_PID)" \
+    --arg fw_last "$(get_val FILE_WRITER_LAST)" \
+    --argjson fw_lines "$POST_FILE_WRITER_LINES" \
+    --argjson fw_size "$(get_val FILE_WRITER_SIZE)" \
+    --argjson fw_gap "$FILE_WRITER_GAP_DATA" \
+    --arg sqlite_status "$sqlite_status" \
+    --arg sqlite_pid "$(get_val SQLITE_PID)" \
+    --arg sqlite_integrity "$(get_val SQLITE_INTEGRITY)" \
+    --argjson sqlite_rows "$POST_SQLITE_ROWS" \
+    --argjson sqlite_min_ts "$(get_val SQLITE_MIN_TS)" \
+    --argjson sqlite_max_ts "$(get_val SQLITE_MAX_TS)" \
+    --argjson sqlite_size "$(get_val SQLITE_SIZE)" \
+    --argjson sqlite_gaps_gt2 "$(get_val SQLITE_GAPS_GT2)" \
+    --argjson sqlite_max_gap "$(get_val SQLITE_MAX_GAP)" \
+    --argjson sqlite_affected "$AFFECTED_WINDOWS" \
+    --argjson sqlite_jitter "$JITTER_COUNT" \
+    --argjson sqlite_gap "$SQLITE_GAP_DATA" \
+    --arg crond_status "$(get_val CROND_STATUS)" \
+    --arg crontab_entry "$(get_val CRONTAB_ENTRY)" \
+    --arg cron_last "$(get_val CRON_LAST)" \
+    --argjson cron_lines "$POST_CRON_LINES" \
+    --argjson cron_gap "$CRON_GAP_DATA" \
+    --arg http_status_svc "$http_status" \
+    --arg http_pid "$(get_val HTTP_PID)" \
+    --argjson http_code "$(get_val HTTP_STATUS)" \
+    --arg eph_fw_status "$eph_fw_status" \
+    --arg eph_fw_pid "$(get_val EPHEMERAL_FILE_WRITER_PID)" \
+    --arg eph_fw_last "$(get_val EPHEMERAL_FILE_WRITER_LAST)" \
+    --argjson eph_fw_lines "$POST_EPHEMERAL_FILE_WRITER_LINES" \
+    --argjson eph_fw_size "$(get_val EPHEMERAL_FILE_WRITER_SIZE)" \
+    --argjson eph_fw_gap "$EPHEMERAL_FILE_WRITER_GAP_DATA" \
+    --arg eph_sqlite_status "$eph_sqlite_status" \
+    --arg eph_sqlite_pid "$(get_val EPHEMERAL_SQLITE_PID)" \
+    --arg eph_sqlite_integrity "$(get_val EPHEMERAL_SQLITE_INTEGRITY)" \
+    --argjson eph_sqlite_rows "$POST_EPHEMERAL_SQLITE_ROWS" \
+    --argjson eph_sqlite_min_ts "$(get_val EPHEMERAL_SQLITE_MIN_TS)" \
+    --argjson eph_sqlite_max_ts "$(get_val EPHEMERAL_SQLITE_MAX_TS)" \
+    --argjson eph_sqlite_size "$(get_val EPHEMERAL_SQLITE_SIZE)" \
+    --arg vm_hostname "$(get_val VM_HOSTNAME)" \
+    --arg vm_ip "$(get_val VM_IP_INTERNAL)" \
+    --argjson vm_uptime "$(get_val VM_UPTIME)" \
+    --argjson disk_total "$(get_val DISK_TOTAL)" \
+    --argjson disk_used "$(get_val DISK_USED)" \
+    --argjson disk_avail "$(get_val DISK_AVAIL)" \
+    --argjson data_dir_size "$(get_val DATA_DIR_SIZE)" \
+    --argjson has_pre "$has_pre_json" \
+    --arg pre_migration_file "$PRE_MIGRATION_FILE" \
+    --arg source_cluster "$PRE_CLUSTER_SERVER" \
+    --arg target_cluster "$CLUSTER_SERVER" \
+    --arg migration_type "$MIGRATION_TYPE" \
+    --argjson pre_fw_lines "$PRE_FILE_WRITER_LINES" \
+    --argjson post_fw_lines "$POST_FILE_WRITER_LINES" \
+    --argjson fw_diff "$FILE_WRITER_DIFF" \
+    --argjson pre_sqlite_rows "$PRE_SQLITE_ROWS" \
+    --argjson post_sqlite_rows "$POST_SQLITE_ROWS" \
+    --argjson sqlite_diff "$SQLITE_DIFF" \
+    --argjson sqlite_integrity_ok "$(bool_json "$([ "$(get_val SQLITE_INTEGRITY)" == "ok" ] && echo true || echo false)")" \
+    --argjson pre_cron_lines "$PRE_CRON_LINES" \
+    --argjson post_cron_lines "$POST_CRON_LINES" \
+    --argjson cron_diff "$CRON_DIFF" \
+    --arg fw_pid_match "$FILE_WRITER_PID_MATCH" \
+    --arg sqlite_pid_match "$SQLITE_PID_MATCH" \
+    --arg http_pid_match "$HTTP_PID_MATCH" \
+    --argjson hostname_preserved "$(bool_json "$([ "$(get_val VM_HOSTNAME)" == "$PRE_HOSTNAME" ] && echo true || echo false)")" \
+    --arg pre_large_sha "$PRE_LARGE_FILE_SHA256" \
+    --arg post_large_sha "$POST_LARGE_FILE_SHA256" \
+    --argjson pre_large_size "$PRE_LARGE_FILE_SIZE" \
+    --argjson post_large_size "$POST_LARGE_FILE_SIZE" \
+    --argjson large_sha_match "$large_intact_json" \
+    --arg pre_eph_large_sha "$PRE_EPHEMERAL_LARGE_FILE_SHA256" \
+    --arg post_eph_large_sha "$POST_EPHEMERAL_LARGE_FILE_SHA256" \
+    --argjson pre_eph_large_size "$PRE_EPHEMERAL_LARGE_FILE_SIZE" \
+    --argjson post_eph_large_size "$POST_EPHEMERAL_LARGE_FILE_SIZE" \
+    --argjson eph_large_sha_match "$eph_large_intact_json" \
+    --argjson persistent_data_intact "$(bool_json "$([ "$FILE_WRITER_DIFF" -ge 0 ] && [ "$SQLITE_DIFF" -ge 0 ] && [ "$CRON_DIFF" -ge 0 ] && [ "$(get_val SQLITE_INTEGRITY)" == "ok" ] && echo true || echo false)")" \
+    --argjson ephemeral_data_intact "$(bool_json "$([ "$EPHEMERAL_FILE_WRITER_DIFF" -ge 0 ] && [ "$EPHEMERAL_SQLITE_DIFF" -ge 0 ] && [ "$(get_val EPHEMERAL_SQLITE_INTEGRITY)" == "ok" ] && echo true || echo false)")" \
+    --argjson all_processes_running "$(bool_json "$([ "$(get_val FILE_WRITER_PID)" != "none" ] && [ "$(get_val SQLITE_PID)" != "none" ] && [ "$(get_val HTTP_PID)" != "none" ] && [ "$(get_val EPHEMERAL_FILE_WRITER_PID)" != "none" ] && [ "$(get_val EPHEMERAL_SQLITE_PID)" != "none" ] && echo true || echo false)")" \
+    --argjson http_responding "$(bool_json "$([ "$(get_val HTTP_STATUS)" == "200" ] && echo true || echo false)")" \
+    '{
+      type: $type,
+      vm_name: $vm_name,
+      namespace: $namespace,
+      chaos_scenario: $chaos_scenario,
+      timestamp_utc: $timestamp_utc,
+      timestamp_local: $timestamp_local,
+      cluster: {
+        server: $cluster_server,
+        vm_status: $vm_status,
+        vm_node: $vm_node,
+        vm_pod_ip: $vm_pod_ip
       },
-      "sqlite_writer": {
-        "status": "$([ "$(get_val SQLITE_PID)" != "none" ] && echo running || echo stopped)",
-        "pid": "$(get_val SQLITE_PID)",
-        "file": "/data/test.db",
-        "row_count": ${POST_SQLITE_ROWS},
-        "min_timestamp": $(get_val SQLITE_MIN_TS),
-        "max_timestamp": $(get_val SQLITE_MAX_TS),
-        "integrity_check": "$(get_val SQLITE_INTEGRITY)",
-        "file_size_bytes": $(get_val SQLITE_SIZE),
-        "insert_interval_sec": 2,
-        "gap_analysis": {
-          "gaps_greater_than_2s": $(get_val SQLITE_GAPS_GT2),
-          "max_gap_seconds": $(get_val SQLITE_MAX_GAP),
-          "affected_time_range": ${AFFECTED_WINDOWS},
-          "sporadic_jitter_windows": ${JITTER_COUNT},
-          "all_slow_windows": ${SQLITE_GAP_DATA:-[]}
+      workloads: {
+        persistent_vdc: {
+          mount_point: "/data",
+          device: "/dev/vdc",
+          file_writer: {
+            status: $fw_status,
+            pid: $fw_pid,
+            file: "/data/test/log.txt",
+            line_count: $fw_lines,
+            file_size_bytes: $fw_size,
+            last_entry: $fw_last,
+            write_interval_sec: 1,
+            gap_analysis: $fw_gap
+          },
+          sqlite_writer: {
+            status: $sqlite_status,
+            pid: $sqlite_pid,
+            file: "/data/test.db",
+            row_count: $sqlite_rows,
+            min_timestamp: $sqlite_min_ts,
+            max_timestamp: $sqlite_max_ts,
+            integrity_check: $sqlite_integrity,
+            file_size_bytes: $sqlite_size,
+            insert_interval_sec: 2,
+            gap_analysis: {
+              gaps_greater_than_2s: $sqlite_gaps_gt2,
+              max_gap_seconds: $sqlite_max_gap,
+              affected_time_range: $sqlite_affected,
+              sporadic_jitter_windows: $sqlite_jitter,
+              all_slow_windows: $sqlite_gap
+            }
+          },
+          cron_job: {
+            crond_status: $crond_status,
+            crontab_entry: $crontab_entry,
+            log_file: "/data/test/cron.log",
+            log_line_count: $cron_lines,
+            last_entry: $cron_last,
+            interval: "every 1 minute",
+            gap_analysis: $cron_gap
+          },
+          http_server: {
+            status: $http_status_svc,
+            pid: $http_pid,
+            port: 8080,
+            http_response_code: $http_code
+          }
+        },
+        ephemeral_vda: {
+          mount_point: "/var/lib/test-ephemeral",
+          device: "/dev/vda",
+          file_writer: {
+            status: $eph_fw_status,
+            pid: $eph_fw_pid,
+            file: "/var/lib/test-ephemeral/log.txt",
+            line_count: $eph_fw_lines,
+            file_size_bytes: $eph_fw_size,
+            last_entry: $eph_fw_last,
+            write_interval_sec: 1,
+            gap_analysis: $eph_fw_gap
+          },
+          sqlite_writer: {
+            status: $eph_sqlite_status,
+            pid: $eph_sqlite_pid,
+            file: "/var/lib/test-ephemeral/test.db",
+            row_count: $eph_sqlite_rows,
+            min_timestamp: $eph_sqlite_min_ts,
+            max_timestamp: $eph_sqlite_max_ts,
+            integrity_check: $eph_sqlite_integrity,
+            file_size_bytes: $eph_sqlite_size,
+            insert_interval_sec: 2
+          }
         }
       },
-      "cron_job": {
-        "crond_status": "$(get_val CROND_STATUS)",
-        "crontab_entry": "$(get_val CRONTAB_ENTRY)",
-        "log_file": "/data/test/cron.log",
-        "log_line_count": ${POST_CRON_LINES},
-        "last_entry": "$(get_val CRON_LAST)",
-        "interval": "every 1 minute",
-        "gap_analysis": ${CRON_GAP_DATA:-[]}
+      vm_info: {
+        hostname: $vm_hostname,
+        ip_address: $vm_ip,
+        uptime_seconds: $vm_uptime,
+        disk: {
+          total_bytes: $disk_total,
+          used_bytes: $disk_used,
+          available_bytes: $disk_avail
+        },
+        data_dir_size_bytes: $data_dir_size
       },
-      "http_server": {
-        "status": "$([ "$(get_val HTTP_PID)" != "none" ] && echo running || echo stopped)",
-        "pid": "$(get_val HTTP_PID)",
-        "port": 8080,
-        "http_response_code": $(get_val HTTP_STATUS)
+      comparison: {
+        has_pre_migration_data: $has_pre,
+        pre_migration_file: $pre_migration_file,
+        source_cluster: $source_cluster,
+        target_cluster: $target_cluster,
+        inferred_migration_type: $migration_type,
+        data_integrity: {
+          file_writer: {
+            pre_lines: $pre_fw_lines,
+            post_lines: $post_fw_lines,
+            diff: $fw_diff,
+            data_loss: ($fw_diff < 0)
+          },
+          sqlite: {
+            pre_rows: $pre_sqlite_rows,
+            post_rows: $post_sqlite_rows,
+            diff: $sqlite_diff,
+            data_loss: ($sqlite_diff < 0),
+            integrity_ok: $sqlite_integrity_ok
+          },
+          cron: {
+            pre_lines: $pre_cron_lines,
+            post_lines: $post_cron_lines,
+            diff: $cron_diff,
+            data_loss: ($cron_diff < 0)
+          }
+        },
+        process_continuity: {
+          file_writer_pid: $fw_pid_match,
+          sqlite_writer_pid: $sqlite_pid_match,
+          http_server_pid: $http_pid_match
+        },
+        network: {
+          hostname_preserved: $hostname_preserved
+        }
+      },
+      large_data_validation: {
+        persistent_vdc: {
+          file_path: "/data/large-file.bin",
+          sha256_match: $large_sha_match,
+          pre_sha256: $pre_large_sha,
+          post_sha256: $post_large_sha,
+          pre_size_bytes: $pre_large_size,
+          post_size_bytes: $post_large_size
+        },
+        ephemeral_vda: {
+          file_path: "/var/lib/test-ephemeral/large-file.bin",
+          sha256_match: $eph_large_sha_match,
+          pre_sha256: $pre_eph_large_sha,
+          post_sha256: $post_eph_large_sha,
+          pre_size_bytes: $pre_eph_large_size,
+          post_size_bytes: $post_eph_large_size
+        }
+      },
+      verdict: {
+        persistent_data_intact: $persistent_data_intact,
+        ephemeral_data_intact: $ephemeral_data_intact,
+        persistent_large_data_intact: $large_sha_match,
+        ephemeral_large_data_intact: $eph_large_sha_match,
+        all_processes_running: $all_processes_running,
+        http_responding: $http_responding
       }
-    },
-    "ephemeral_vda": {
-      "mount_point": "/var/lib/test-ephemeral",
-      "device": "/dev/vda",
-      "file_writer": {
-        "status": "$([ "$(get_val EPHEMERAL_FILE_WRITER_PID)" != "none" ] && echo running || echo stopped)",
-        "pid": "$(get_val EPHEMERAL_FILE_WRITER_PID)",
-        "file": "/var/lib/test-ephemeral/log.txt",
-        "line_count": ${POST_EPHEMERAL_FILE_WRITER_LINES},
-        "file_size_bytes": $(get_val EPHEMERAL_FILE_WRITER_SIZE),
-        "last_entry": "$(get_val EPHEMERAL_FILE_WRITER_LAST)",
-        "write_interval_sec": 1,
-        "gap_analysis": ${EPHEMERAL_FILE_WRITER_GAP_DATA:-[]}
-      },
-      "sqlite_writer": {
-        "status": "$([ "$(get_val EPHEMERAL_SQLITE_PID)" != "none" ] && echo running || echo stopped)",
-        "pid": "$(get_val EPHEMERAL_SQLITE_PID)",
-        "file": "/var/lib/test-ephemeral/test.db",
-        "row_count": ${POST_EPHEMERAL_SQLITE_ROWS},
-        "min_timestamp": $(get_val EPHEMERAL_SQLITE_MIN_TS),
-        "max_timestamp": $(get_val EPHEMERAL_SQLITE_MAX_TS),
-        "integrity_check": "$(get_val EPHEMERAL_SQLITE_INTEGRITY)",
-        "file_size_bytes": $(get_val EPHEMERAL_SQLITE_SIZE),
-        "insert_interval_sec": 2
-      }
-    }
-  },
-  "vm_info": {
-    "hostname": "$(get_val VM_HOSTNAME)",
-    "ip_address": "$(get_val VM_IP_INTERNAL)",
-    "uptime_seconds": $(get_val VM_UPTIME),
-    "disk": {
-      "total_bytes": $(get_val DISK_TOTAL),
-      "used_bytes": $(get_val DISK_USED),
-      "available_bytes": $(get_val DISK_AVAIL)
-    },
-    "data_dir_size_bytes": $(get_val DATA_DIR_SIZE)
-  },
-  "comparison": {
-    "has_pre_migration_data": ${HAS_PRE},
-    "pre_migration_file": "${PRE_MIGRATION_FILE}",
-    "source_cluster": "${PRE_CLUSTER_SERVER}",
-    "target_cluster": "${CLUSTER_SERVER}",
-    "inferred_migration_type": "${MIGRATION_TYPE}",
-    "data_integrity": {
-      "file_writer": {
-        "pre_lines": ${PRE_FILE_WRITER_LINES},
-        "post_lines": ${POST_FILE_WRITER_LINES},
-        "diff": ${FILE_WRITER_DIFF},
-        "data_loss": $([ "$FILE_WRITER_DIFF" -ge 0 ] && echo false || echo true)
-      },
-      "sqlite": {
-        "pre_rows": ${PRE_SQLITE_ROWS},
-        "post_rows": ${POST_SQLITE_ROWS},
-        "diff": ${SQLITE_DIFF},
-        "data_loss": $([ "$SQLITE_DIFF" -ge 0 ] && echo false || echo true),
-        "integrity_ok": $([ "$(get_val SQLITE_INTEGRITY)" == "ok" ] && echo true || echo false)
-      },
-      "cron": {
-        "pre_lines": ${PRE_CRON_LINES},
-        "post_lines": ${POST_CRON_LINES},
-        "diff": ${CRON_DIFF},
-        "data_loss": $([ "$CRON_DIFF" -ge 0 ] && echo false || echo true)
-      }
-    },
-    "process_continuity": {
-      "file_writer_pid": "${FILE_WRITER_PID_MATCH}",
-      "sqlite_writer_pid": "${SQLITE_PID_MATCH}",
-      "http_server_pid": "${HTTP_PID_MATCH}"
-    },
-    "network": {
-      "hostname_preserved": $([ "$(get_val VM_HOSTNAME)" == "${PRE_HOSTNAME}" ] && echo true || echo false)
-    }
-  },
-  "large_data_validation": {
-    "persistent_vdc": {
-      "file_path": "/data/large-file.bin",
-      "sha256_match": $(echo $LARGE_DATA_INTACT),
-      "pre_sha256": "$PRE_LARGE_FILE_SHA256",
-      "post_sha256": "$POST_LARGE_FILE_SHA256",
-      "pre_size_bytes": $PRE_LARGE_FILE_SIZE,
-      "post_size_bytes": $POST_LARGE_FILE_SIZE
-    },
-    "ephemeral_vda": {
-      "file_path": "/var/lib/test-ephemeral/large-file.bin",
-      "sha256_match": $(echo $EPHEMERAL_DATA_INTACT),
-      "pre_sha256": "$PRE_EPHEMERAL_LARGE_FILE_SHA256",
-      "post_sha256": "$POST_EPHEMERAL_LARGE_FILE_SHA256",
-      "pre_size_bytes": $PRE_EPHEMERAL_LARGE_FILE_SIZE,
-      "post_size_bytes": $POST_EPHEMERAL_LARGE_FILE_SIZE
-    }
-  },
-  "verdict": {
-    "persistent_data_intact": $([ "$FILE_WRITER_DIFF" -ge 0 ] && [ "$SQLITE_DIFF" -ge 0 ] && [ "$CRON_DIFF" -ge 0 ] && [ "$(get_val SQLITE_INTEGRITY)" == "ok" ] && echo true || echo false),
-    "ephemeral_data_intact": $([ "$EPHEMERAL_FILE_WRITER_DIFF" -ge 0 ] && [ "$EPHEMERAL_SQLITE_DIFF" -ge 0 ] && [ "$(get_val EPHEMERAL_SQLITE_INTEGRITY)" == "ok" ] && echo true || echo false),
-    "persistent_large_data_intact": $(echo $LARGE_DATA_INTACT),
-    "ephemeral_large_data_intact": $(echo $EPHEMERAL_DATA_INTACT),
-    "all_processes_running": $([ "$(get_val FILE_WRITER_PID)" != "none" ] && [ "$(get_val SQLITE_PID)" != "none" ] && [ "$(get_val HTTP_PID)" != "none" ] && [ "$(get_val EPHEMERAL_FILE_WRITER_PID)" != "none" ] && [ "$(get_val EPHEMERAL_SQLITE_PID)" != "none" ] && echo true || echo false),
-    "http_responding": $([ "$(get_val HTTP_STATUS)" == "200" ] && echo true || echo false)
-  }
+    }' > "$OUTPUT_FILE"
+
+  task.pass "JSON report saved"
+  log.verbose "Output: ${OUTPUT_FILE}"
 }
-JSONEOF
 
-task.pass "JSON report saved"
-log.verbose "Output: ${OUTPUT_FILE}"
+print_gap_summary() {
+  echo ""
+  echo "--- Comparison Summary ---"
+  echo ""
+  echo "--- Persistent Data (vdc /data/) ---"
+  printf "  %-18s %-10s %-10s %-10s %-8s\n" "Workload" "Pre" "Post" "Diff" "Status"
+  printf "  %-18s %-10s %-10s %-10s %-8s\n" "--------" "---" "----" "----" "------"
+  printf "  %-18s %-10s %-10s %-10s %-8s\n" "File writer lines" "$PRE_FILE_WRITER_LINES" "$POST_FILE_WRITER_LINES" "+${FILE_WRITER_DIFF}" "$([ "$FILE_WRITER_DIFF" -ge 0 ] && echo 'PASS' || echo 'FAIL')"
+  printf "  %-18s %-10s %-10s %-10s %-8s\n" "SQLite rows" "$PRE_SQLITE_ROWS" "$POST_SQLITE_ROWS" "+${SQLITE_DIFF}" "$([ "$SQLITE_DIFF" -ge 0 ] && echo 'PASS' || echo 'FAIL')"
+  printf "  %-18s %-10s %-10s %-10s %-8s\n" "Cron log lines" "$PRE_CRON_LINES" "$POST_CRON_LINES" "+${CRON_DIFF}" "$([ "$CRON_DIFF" -ge 0 ] && echo 'PASS' || echo 'FAIL')"
+  echo ""
+  echo "  SQLite integrity:    $(get_val SQLITE_INTEGRITY)"
+  echo "  SQLite max gap:      $(get_val SQLITE_MAX_GAP)s (expected: 2s)"
+  echo "  SQLite gaps > 2s:    $(get_val SQLITE_GAPS_GT2)"
+  echo "  Migration type:      ${MIGRATION_TYPE}"
+  echo ""
+  echo "  Process PIDs:        file-writer=$(get_val FILE_WRITER_PID)(${FILE_WRITER_PID_MATCH}) sqlite=$(get_val SQLITE_PID)(${SQLITE_PID_MATCH}) http=$(get_val HTTP_PID)(${HTTP_PID_MATCH})"
+  echo "  Services:            crond=$(get_val CROND_STATUS) http=$(get_val HTTP_STATUS)"
+  echo ""
+  echo "--- Ephemeral Data (vda /var/lib/test-ephemeral/) ---"
+  printf "  %-18s %-10s %-10s %-10s %-8s\n" "Workload" "Pre" "Post" "Diff" "Status"
+  printf "  %-18s %-10s %-10s %-10s %-8s\n" "--------" "---" "----" "----" "------"
+  printf "  %-18s %-10s %-10s %-10s %-8s\n" "File writer lines" "$PRE_EPHEMERAL_FILE_WRITER_LINES" "$POST_EPHEMERAL_FILE_WRITER_LINES" "+${EPHEMERAL_FILE_WRITER_DIFF}" "$([ "$EPHEMERAL_FILE_WRITER_DIFF" -ge 0 ] && echo 'PASS' || echo 'FAIL')"
+  printf "  %-18s %-10s %-10s %-10s %-8s\n" "SQLite rows" "$PRE_EPHEMERAL_SQLITE_ROWS" "$POST_EPHEMERAL_SQLITE_ROWS" "+${EPHEMERAL_SQLITE_DIFF}" "$([ "$EPHEMERAL_SQLITE_DIFF" -ge 0 ] && echo 'PASS' || echo 'FAIL')"
+  echo ""
+  echo "  SQLite integrity:    $(get_val EPHEMERAL_SQLITE_INTEGRITY)"
+  echo "  Process PIDs:        file-writer=$(get_val EPHEMERAL_FILE_WRITER_PID)(${EPHEMERAL_FILE_WRITER_PID_MATCH}) sqlite=$(get_val EPHEMERAL_SQLITE_PID)(${EPHEMERAL_SQLITE_PID_MATCH})"
+  echo ""
 
-echo ""
-echo "--- Comparison Summary ---"
-echo ""
-echo "--- Persistent Data (vdc /data/) ---"
-printf "  %-18s %-10s %-10s %-10s %-8s\n" "Workload" "Pre" "Post" "Diff" "Status"
-printf "  %-18s %-10s %-10s %-10s %-8s\n" "--------" "---" "----" "----" "------"
-printf "  %-18s %-10s %-10s %-10s %-8s\n" "File writer lines" "$PRE_FILE_WRITER_LINES" "$POST_FILE_WRITER_LINES" "+${FILE_WRITER_DIFF}" "$([ "$FILE_WRITER_DIFF" -ge 0 ] && echo 'PASS' || echo 'FAIL')"
-printf "  %-18s %-10s %-10s %-10s %-8s\n" "SQLite rows" "$PRE_SQLITE_ROWS" "$POST_SQLITE_ROWS" "+${SQLITE_DIFF}" "$([ "$SQLITE_DIFF" -ge 0 ] && echo 'PASS' || echo 'FAIL')"
-printf "  %-18s %-10s %-10s %-10s %-8s\n" "Cron log lines" "$PRE_CRON_LINES" "$POST_CRON_LINES" "+${CRON_DIFF}" "$([ "$CRON_DIFF" -ge 0 ] && echo 'PASS' || echo 'FAIL')"
-echo ""
-echo "  SQLite integrity:    $(get_val SQLITE_INTEGRITY)"
-echo "  SQLite max gap:      $(get_val SQLITE_MAX_GAP)s (expected: 2s)"
-echo "  SQLite gaps > 2s:    $(get_val SQLITE_GAPS_GT2)"
-echo "  Migration type:      ${MIGRATION_TYPE}"
-echo ""
-echo "  Process PIDs:        file-writer=$(get_val FILE_WRITER_PID)(${FILE_WRITER_PID_MATCH}) sqlite=$(get_val SQLITE_PID)(${SQLITE_PID_MATCH}) http=$(get_val HTTP_PID)(${HTTP_PID_MATCH})"
-echo "  Services:            crond=$(get_val CROND_STATUS) http=$(get_val HTTP_STATUS)"
-echo ""
-echo "--- Ephemeral Data (vda /var/lib/test-ephemeral/) ---"
-printf "  %-18s %-10s %-10s %-10s %-8s\n" "Workload" "Pre" "Post" "Diff" "Status"
-printf "  %-18s %-10s %-10s %-10s %-8s\n" "--------" "---" "----" "----" "------"
-printf "  %-18s %-10s %-10s %-10s %-8s\n" "File writer lines" "$PRE_EPHEMERAL_FILE_WRITER_LINES" "$POST_EPHEMERAL_FILE_WRITER_LINES" "+${EPHEMERAL_FILE_WRITER_DIFF}" "$([ "$EPHEMERAL_FILE_WRITER_DIFF" -ge 0 ] && echo 'PASS' || echo 'FAIL')"
-printf "  %-18s %-10s %-10s %-10s %-8s\n" "SQLite rows" "$PRE_EPHEMERAL_SQLITE_ROWS" "$POST_EPHEMERAL_SQLITE_ROWS" "+${EPHEMERAL_SQLITE_DIFF}" "$([ "$EPHEMERAL_SQLITE_DIFF" -ge 0 ] && echo 'PASS' || echo 'FAIL')"
-echo ""
-echo "  SQLite integrity:    $(get_val EPHEMERAL_SQLITE_INTEGRITY)"
-echo "  Process PIDs:        file-writer=$(get_val EPHEMERAL_FILE_WRITER_PID)(${EPHEMERAL_FILE_WRITER_PID_MATCH}) sqlite=$(get_val EPHEMERAL_SQLITE_PID)(${EPHEMERAL_SQLITE_PID_MATCH})"
-echo ""
+  echo "--- Large File Validation ---"
+  echo ""
+  if [[ "$PRE_LARGE_FILE_SHA256" != "none" ]]; then
+    echo "  Persistent (vdc):"
+    echo "    Pre-migration SHA256:  ${PRE_LARGE_FILE_SHA256}"
+    echo "    Post-migration SHA256: ${POST_LARGE_FILE_SHA256}"
+    echo "    Match:                 $([ "$LARGE_DATA_INTACT" == "true" ] && echo 'YES (PASS)' || echo 'NO (FAIL)')"
+    echo "    File size:             ${POST_LARGE_FILE_SIZE} bytes ($(( POST_LARGE_FILE_SIZE / 1024 / 1024 ))MB)"
+  fi
+  echo ""
+  if [[ "$PRE_EPHEMERAL_LARGE_FILE_SHA256" != "none" ]]; then
+    echo "  Ephemeral (vda):"
+    echo "    Pre-migration SHA256:  ${PRE_EPHEMERAL_LARGE_FILE_SHA256}"
+    echo "    Post-migration SHA256: ${POST_EPHEMERAL_LARGE_FILE_SHA256}"
+    echo "    Match:                 $([ "$EPHEMERAL_DATA_INTACT" == "true" ] && echo 'YES (PASS)' || echo 'NO (FAIL)')"
+    echo "    File size:             ${POST_EPHEMERAL_LARGE_FILE_SIZE} bytes ($(( POST_EPHEMERAL_LARGE_FILE_SIZE / 1024 / 1024 ))MB)"
+  fi
+  echo ""
 
-echo "--- Large File Validation ---"
-echo ""
-if [[ "$PRE_LARGE_FILE_SHA256" != "none" ]]; then
-  echo "  Persistent (vdc):"
-  echo "    Pre-migration SHA256:  ${PRE_LARGE_FILE_SHA256}"
-  echo "    Post-migration SHA256: ${POST_LARGE_FILE_SHA256}"
-  echo "    Match:                 $([ "$LARGE_DATA_INTACT" == "true" ] && echo 'YES (PASS)' || echo 'NO (FAIL)')"
-  echo "    File size:             ${POST_LARGE_FILE_SIZE} bytes ($(( POST_LARGE_FILE_SIZE / 1024 / 1024 ))MB)"
-fi
-echo ""
-if [[ "$PRE_EPHEMERAL_LARGE_FILE_SHA256" != "none" ]]; then
-  echo "  Ephemeral (vda):"
-  echo "    Pre-migration SHA256:  ${PRE_EPHEMERAL_LARGE_FILE_SHA256}"
-  echo "    Post-migration SHA256: ${POST_EPHEMERAL_LARGE_FILE_SHA256}"
-  echo "    Match:                 $([ "$EPHEMERAL_DATA_INTACT" == "true" ] && echo 'YES (PASS)' || echo 'NO (FAIL)')"
-  echo "    File size:             ${POST_EPHEMERAL_LARGE_FILE_SIZE} bytes ($(( POST_EPHEMERAL_LARGE_FILE_SIZE / 1024 / 1024 ))MB)"
-fi
-echo ""
-
-echo "--- SQLite Insert Gap Analysis (30s windows) ---"
-echo ""
-echo "$SQLITE_GAP_DATA" | python3 -c "
+  echo "--- SQLite Insert Gap Analysis (30s windows) ---"
+  echo ""
+  echo "$SQLITE_GAP_DATA" | python3 -c "
 import json, sys
 try:
     data = json.load(sys.stdin)
@@ -763,22 +795,20 @@ try:
     else:
         affected = [r for r in data if r.get('status') == 'affected']
         jitter = [r for r in data if r.get('status') == 'jitter']
-
         if affected:
-            print(f'  MIGRATION-AFFECTED WINDOW:')
+            print('  MIGRATION-AFFECTED WINDOW:')
             print(f'    From:           {affected[0][\"time_window_utc\"]} UTC')
             print(f'    To:             {affected[-1][\"time_window_utc\"]} UTC')
             print(f'    Duration:       ~{affected[-1][\"epoch\"] - affected[0][\"epoch\"] + 30}s ({(affected[-1][\"epoch\"] - affected[0][\"epoch\"] + 30) // 60} min)')
             print(f'    Slow inserts:   {sum(r[\"slow_inserts\"] for r in affected)} of {sum(r[\"total_inserts\"] for r in affected)} ({round(sum(r[\"slow_pct\"] for r in affected) / len(affected), 1)}% avg)')
             print(f'    Max gap:        {max(r[\"max_gap_sec\"] for r in affected)}s')
             print()
-            print(f'    Time Window UTC          Total  Slow   Slow%  MaxGap  Status')
-            print(f'    -------------------      -----  ----   -----  ------  ------')
+            print('    Time Window UTC          Total  Slow   Slow%  MaxGap  Status')
+            print('    -------------------      -----  ----   -----  ------  ------')
             for r in affected:
                 print(f'    {r[\"time_window_utc\"]}  {r[\"total_inserts\"]:>5}  {r[\"slow_inserts\"]:>4}   {r[\"slow_pct\"]:>5}%  {r[\"max_gap_sec\"]:>5}s  AFFECTED')
         else:
             print('  No migration-affected window detected.')
-
         print()
         if jitter:
             print(f'  SPORADIC JITTER: {len(jitter)} windows with minor 1-off slow inserts (normal OS scheduling noise)')
@@ -787,11 +817,11 @@ try:
 except Exception as e:
     print(f'  Error parsing gap data: {e}')
 " 2>/dev/null
-echo ""
+  echo ""
 
-echo "--- File-Writer Gap Analysis (persistent vdc) ---"
-echo ""
-echo "$FILE_WRITER_GAP_DATA" | python3 -c "
+  echo "--- File-Writer Gap Analysis (persistent vdc) ---"
+  echo ""
+  echo "$FILE_WRITER_GAP_DATA" | python3 -c "
 import json, sys
 try:
     data = json.load(sys.stdin)
@@ -800,22 +830,20 @@ try:
     else:
         affected = [r for r in data if r.get('status') == 'affected']
         jitter = [r for r in data if r.get('status') == 'jitter']
-
         if affected:
-            print(f'  MIGRATION-AFFECTED WINDOW:')
+            print('  MIGRATION-AFFECTED WINDOW:')
             print(f'    From:           {affected[0][\"time_window_utc\"]} UTC')
             print(f'    To:             {affected[-1][\"time_window_utc\"]} UTC')
             print(f'    Duration:       ~{affected[-1][\"epoch\"] - affected[0][\"epoch\"] + 30}s ({(affected[-1][\"epoch\"] - affected[0][\"epoch\"] + 30) // 60} min)')
             print(f'    Slow writes:    {sum(r[\"slow_writes\"] for r in affected)} of {sum(r[\"total_writes\"] for r in affected)} ({round(sum(r[\"slow_pct\"] for r in affected) / len(affected), 1)}% avg)')
             print(f'    Max gap:        {max(r[\"max_gap_sec\"] for r in affected)}s')
             print()
-            print(f'    Time Window UTC          Total  Slow   Slow%  MaxGap  Status')
-            print(f'    -------------------      -----  ----   -----  ------  ------')
+            print('    Time Window UTC          Total  Slow   Slow%  MaxGap  Status')
+            print('    -------------------      -----  ----   -----  ------  ------')
             for r in affected:
                 print(f'    {r[\"time_window_utc\"]}  {r[\"total_writes\"]:>5}  {r[\"slow_writes\"]:>4}   {r[\"slow_pct\"]:>5}%  {r[\"max_gap_sec\"]:>5}s  AFFECTED')
         else:
             print('  No migration-affected window detected.')
-
         print()
         if jitter:
             print(f'  SPORADIC JITTER: {len(jitter)} windows with minor delays (normal OS scheduling noise)')
@@ -824,11 +852,11 @@ try:
 except Exception as e:
     print(f'  Error parsing gap data: {e}')
 " 2>/dev/null
-echo ""
+  echo ""
 
-echo "--- File-Writer Gap Analysis (ephemeral vda) ---"
-echo ""
-echo "$EPHEMERAL_FILE_WRITER_GAP_DATA" | python3 -c "
+  echo "--- File-Writer Gap Analysis (ephemeral vda) ---"
+  echo ""
+  echo "$EPHEMERAL_FILE_WRITER_GAP_DATA" | python3 -c "
 import json, sys
 try:
     data = json.load(sys.stdin)
@@ -837,22 +865,20 @@ try:
     else:
         affected = [r for r in data if r.get('status') == 'affected']
         jitter = [r for r in data if r.get('status') == 'jitter']
-
         if affected:
-            print(f'  MIGRATION-AFFECTED WINDOW:')
+            print('  MIGRATION-AFFECTED WINDOW:')
             print(f'    From:           {affected[0][\"time_window_utc\"]} UTC')
             print(f'    To:             {affected[-1][\"time_window_utc\"]} UTC')
             print(f'    Duration:       ~{affected[-1][\"epoch\"] - affected[0][\"epoch\"] + 30}s ({(affected[-1][\"epoch\"] - affected[0][\"epoch\"] + 30) // 60} min)')
             print(f'    Slow writes:    {sum(r[\"slow_writes\"] for r in affected)} of {sum(r[\"total_writes\"] for r in affected)} ({round(sum(r[\"slow_pct\"] for r in affected) / len(affected), 1)}% avg)')
             print(f'    Max gap:        {max(r[\"max_gap_sec\"] for r in affected)}s')
             print()
-            print(f'    Time Window UTC          Total  Slow   Slow%  MaxGap  Status')
-            print(f'    -------------------      -----  ----   -----  ------  ------')
+            print('    Time Window UTC          Total  Slow   Slow%  MaxGap  Status')
+            print('    -------------------      -----  ----   -----  ------  ------')
             for r in affected:
                 print(f'    {r[\"time_window_utc\"]}  {r[\"total_writes\"]:>5}  {r[\"slow_writes\"]:>4}   {r[\"slow_pct\"]:>5}%  {r[\"max_gap_sec\"]:>5}s  AFFECTED')
         else:
             print('  No migration-affected window detected.')
-
         print()
         if jitter:
             print(f'  SPORADIC JITTER: {len(jitter)} windows with minor delays (normal OS scheduling noise)')
@@ -861,11 +887,11 @@ try:
 except Exception as e:
     print(f'  Error parsing gap data: {e}')
 " 2>/dev/null
-echo ""
+  echo ""
 
-echo "--- Cron Job Gap Analysis ---"
-echo ""
-echo "$CRON_GAP_DATA" | python3 -c "
+  echo "--- Cron Job Gap Analysis ---"
+  echo ""
+  echo "$CRON_GAP_DATA" | python3 -c "
 import json, sys
 try:
     data = json.load(sys.stdin)
@@ -874,8 +900,8 @@ try:
     else:
         print(f'  MISSING CRON EXECUTIONS DETECTED: {len(data)} gaps found')
         print()
-        print(f'    From Time UTC             To Time UTC               Gap(s)  Missing')
-        print(f'    ------------------------  ------------------------  ------  -------')
+        print('    From Time UTC             To Time UTC               Gap(s)  Missing')
+        print('    ------------------------  ------------------------  ------  -------')
         for r in data:
             print(f'    {r[\"from_time_utc\"]}  {r[\"to_time_utc\"]}  {r[\"gap_seconds\"]:>6}  {r[\"missing_executions\"]:>7}')
         print()
@@ -886,214 +912,241 @@ try:
 except Exception as e:
     print(f'  Error parsing gap data: {e}')
 " 2>/dev/null
-echo ""
+  echo ""
+}
 
-# Compute individual check statuses
-PERSISTENT_FILE_WRITER_STATUS="PASS"
-[ "$FILE_WRITER_DIFF" -lt 0 ] && PERSISTENT_FILE_WRITER_STATUS="FAIL"
+compute_verdict() {
+  PERSISTENT_FILE_WRITER_STATUS="PASS"
+  [[ "$FILE_WRITER_DIFF" -lt 0 ]] && PERSISTENT_FILE_WRITER_STATUS="FAIL"
 
-PERSISTENT_SQLITE_STATUS="PASS"
-[ "$SQLITE_DIFF" -lt 0 ] && PERSISTENT_SQLITE_STATUS="FAIL"
+  PERSISTENT_SQLITE_STATUS="PASS"
+  [[ "$SQLITE_DIFF" -lt 0 ]] && PERSISTENT_SQLITE_STATUS="FAIL"
 
-PERSISTENT_SQLITE_INTEGRITY_STATUS="PASS"
-if [ "$(get_val SQLITE_INTEGRITY)" == "unknown" ]; then
-  PERSISTENT_SQLITE_INTEGRITY_STATUS="SKIP"
-elif [ "$(get_val SQLITE_INTEGRITY)" != "ok" ]; then
-  PERSISTENT_SQLITE_INTEGRITY_STATUS="FAIL"
-fi
-
-PERSISTENT_CRON_STATUS="PASS"
-[ "$CRON_DIFF" -lt 0 ] && PERSISTENT_CRON_STATUS="FAIL"
-
-PERSISTENT_LARGE_FILE_STATUS="PASS"
-[ "$LARGE_DATA_INTACT" != "true" ] && PERSISTENT_LARGE_FILE_STATUS="FAIL"
-
-EPHEMERAL_FILE_WRITER_STATUS="PASS"
-[ "$EPHEMERAL_FILE_WRITER_DIFF" -lt 0 ] && EPHEMERAL_FILE_WRITER_STATUS="FAIL"
-
-EPHEMERAL_SQLITE_STATUS="PASS"
-[ "$EPHEMERAL_SQLITE_DIFF" -lt 0 ] && EPHEMERAL_SQLITE_STATUS="FAIL"
-
-EPHEMERAL_SQLITE_INTEGRITY_STATUS="PASS"
-if [ "$(get_val EPHEMERAL_SQLITE_INTEGRITY)" == "unknown" ]; then
-  EPHEMERAL_SQLITE_INTEGRITY_STATUS="SKIP"
-elif [ "$(get_val EPHEMERAL_SQLITE_INTEGRITY)" != "ok" ]; then
-  EPHEMERAL_SQLITE_INTEGRITY_STATUS="FAIL"
-fi
-
-EPHEMERAL_LARGE_FILE_STATUS="PASS"
-[ "$EPHEMERAL_DATA_INTACT" != "true" ] && EPHEMERAL_LARGE_FILE_STATUS="FAIL"
-
-HTTP_STATUS_CHECK="PASS"
-[ "$(get_val HTTP_STATUS)" != "200" ] && HTTP_STATUS_CHECK="FAIL"
-
-CROND_STATUS_CHECK="PASS"
-if [[ "$HAS_PRE" == "true" ]]; then
-  PRE_CROND_STATUS=$(python3 -c "import json; d=json.load(open('${PRE_MIGRATION_FILE}')); print(d.get('workloads', {}).get('persistent_vdc', {}).get('cron_job', {}).get('crond_status', 'unknown'))" 2>/dev/null || echo "unknown")
-  if [[ "$PRE_CROND_STATUS" == "inactive" ]] && [[ "$(get_val CROND_STATUS)" == "inactive" ]]; then
-    CROND_STATUS_CHECK="SKIP"
-  elif [[ "$(get_val CROND_STATUS)" != "active" ]]; then
-    CROND_STATUS_CHECK="FAIL"
+  PERSISTENT_SQLITE_INTEGRITY_STATUS="PASS"
+  if [[ "$(get_val SQLITE_INTEGRITY)" == "unknown" ]]; then
+    PERSISTENT_SQLITE_INTEGRITY_STATUS="SKIP"
+  elif [[ "$(get_val SQLITE_INTEGRITY)" != "ok" ]]; then
+    PERSISTENT_SQLITE_INTEGRITY_STATUS="FAIL"
   fi
-else
-  [ "$(get_val CROND_STATUS)" != "active" ] && CROND_STATUS_CHECK="FAIL"
-fi
 
-# Service running checks
-SERVICES_RUNNING_STATUS="PASS"
-if [ "$(get_val FILE_WRITER_PID)" == "none" ] || \
-   [ "$(get_val SQLITE_PID)" == "none" ] || \
-   [ "$(get_val HTTP_PID)" == "none" ] || \
-   [ "$(get_val EPHEMERAL_FILE_WRITER_PID)" == "none" ] || \
-   [ "$(get_val EPHEMERAL_SQLITE_PID)" == "none" ]; then
-  SERVICES_RUNNING_STATUS="FAIL"
-fi
+  PERSISTENT_CRON_STATUS="PASS"
+  [[ "$CRON_DIFF" -lt 0 ]] && PERSISTENT_CRON_STATUS="FAIL"
 
-echo "╔════════════════════════════════════════════════════════════════════════════╗"
-echo "║                      POST-MIGRATION VALIDATION SUMMARY                     ║"
-echo "╚════════════════════════════════════════════════════════════════════════════╝"
-echo ""
+  PERSISTENT_LARGE_FILE_STATUS="PASS"
+  [[ "$LARGE_DATA_INTACT" != "true" ]] && PERSISTENT_LARGE_FILE_STATUS="FAIL"
 
-# --- PERSISTENT DISK (VDC) CHECKS ---
-echo "┌─────────────────────────────────────────────────────────────────────────────┐"
-echo "│ PERSISTENT DISK (/dev/vdc → /data/)                                        │"
-echo "└─────────────────────────────────────────────────────────────────────────────┘"
-echo ""
-echo "  Data Integrity:"
-printf "    %-40s [%s]\n" "File-writer data continuity" "$PERSISTENT_FILE_WRITER_STATUS"
-if [ "$PERSISTENT_FILE_WRITER_STATUS" == "FAIL" ]; then
-  printf "      → Data loss detected: %d lines lost\n" "$((0 - FILE_WRITER_DIFF))"
-fi
+  EPHEMERAL_FILE_WRITER_STATUS="PASS"
+  [[ "$EPHEMERAL_FILE_WRITER_DIFF" -lt 0 ]] && EPHEMERAL_FILE_WRITER_STATUS="FAIL"
 
-printf "    %-40s [%s]\n" "SQLite data continuity" "$PERSISTENT_SQLITE_STATUS"
-if [ "$PERSISTENT_SQLITE_STATUS" == "FAIL" ]; then
-  printf "      → Data loss detected: %d rows lost\n" "$((0 - SQLITE_DIFF))"
-fi
+  EPHEMERAL_SQLITE_STATUS="PASS"
+  [[ "$EPHEMERAL_SQLITE_DIFF" -lt 0 ]] && EPHEMERAL_SQLITE_STATUS="FAIL"
 
-printf "    %-40s [%s]\n" "SQLite database integrity" "$PERSISTENT_SQLITE_INTEGRITY_STATUS"
-if [ "$PERSISTENT_SQLITE_INTEGRITY_STATUS" == "FAIL" ]; then
-  printf "      → Integrity check result: %s\n" "$(get_val SQLITE_INTEGRITY)"
-elif [ "$PERSISTENT_SQLITE_INTEGRITY_STATUS" == "SKIP" ]; then
-  printf "      → sqlite3 not available in VM, skipped\n"
-fi
+  EPHEMERAL_SQLITE_INTEGRITY_STATUS="PASS"
+  if [[ "$(get_val EPHEMERAL_SQLITE_INTEGRITY)" == "unknown" ]]; then
+    EPHEMERAL_SQLITE_INTEGRITY_STATUS="SKIP"
+  elif [[ "$(get_val EPHEMERAL_SQLITE_INTEGRITY)" != "ok" ]]; then
+    EPHEMERAL_SQLITE_INTEGRITY_STATUS="FAIL"
+  fi
 
-printf "    %-40s [%s]\n" "Cron log continuity" "$PERSISTENT_CRON_STATUS"
-if [ "$PERSISTENT_CRON_STATUS" == "FAIL" ]; then
-  printf "      → Data loss detected: %d entries lost\n" "$((0 - CRON_DIFF))"
-fi
+  EPHEMERAL_LARGE_FILE_STATUS="PASS"
+  [[ "$EPHEMERAL_DATA_INTACT" != "true" ]] && EPHEMERAL_LARGE_FILE_STATUS="FAIL"
 
-printf "    %-40s [%s]\n" "Large file integrity (SHA256)" "$PERSISTENT_LARGE_FILE_STATUS"
-if [ "$PERSISTENT_LARGE_FILE_STATUS" == "FAIL" ]; then
-  echo "      → SHA256 mismatch detected"
-  echo "      → Pre:  ${PRE_LARGE_FILE_SHA256}"
-  echo "      → Post: ${POST_LARGE_FILE_SHA256}"
-fi
-echo ""
+  HTTP_STATUS_CHECK="PASS"
+  [[ "$(get_val HTTP_STATUS)" != "200" ]] && HTTP_STATUS_CHECK="FAIL"
 
-echo "  Services:"
-printf "    %-40s [%s]\n" "HTTP server responding (port 8080)" "$HTTP_STATUS_CHECK"
-if [ "$HTTP_STATUS_CHECK" == "FAIL" ]; then
-  printf "      → HTTP response code: %s (expected: 200)\n" "$(get_val HTTP_STATUS)"
-fi
-
-printf "    %-40s [%s]\n" "Cron daemon active" "$CROND_STATUS_CHECK"
-if [ "$CROND_STATUS_CHECK" == "FAIL" ]; then
-  printf "      → Crond status: %s (expected: active)\n" "$(get_val CROND_STATUS)"
-elif [ "$CROND_STATUS_CHECK" == "SKIP" ]; then
-  printf "      → Was inactive pre-migration, unchanged\n"
-fi
-echo ""
-
-# --- EPHEMERAL DISK (VDA) CHECKS ---
-echo "┌─────────────────────────────────────────────────────────────────────────────┐"
-echo "│ EPHEMERAL DISK (/dev/vda → /var/lib/test-ephemeral/)                       │"
-echo "└─────────────────────────────────────────────────────────────────────────────┘"
-echo ""
-echo "  Data Integrity:"
-printf "    %-40s [%s]\n" "File-writer data continuity" "$EPHEMERAL_FILE_WRITER_STATUS"
-if [ "$EPHEMERAL_FILE_WRITER_STATUS" == "FAIL" ]; then
-  printf "      → Data loss detected: %d lines lost\n" "$((0 - EPHEMERAL_FILE_WRITER_DIFF))"
-  echo "      → Expected for cold migration (vda recreated)"
-fi
-
-printf "    %-40s [%s]\n" "SQLite data continuity" "$EPHEMERAL_SQLITE_STATUS"
-if [ "$EPHEMERAL_SQLITE_STATUS" == "FAIL" ]; then
-  printf "      → Data loss detected: %d rows lost\n" "$((0 - EPHEMERAL_SQLITE_DIFF))"
-  echo "      → Expected for cold migration (vda recreated)"
-fi
-
-printf "    %-40s [%s]\n" "SQLite database integrity" "$EPHEMERAL_SQLITE_INTEGRITY_STATUS"
-if [ "$EPHEMERAL_SQLITE_INTEGRITY_STATUS" == "FAIL" ]; then
-  printf "      → Integrity check result: %s\n" "$(get_val EPHEMERAL_SQLITE_INTEGRITY)"
-elif [ "$EPHEMERAL_SQLITE_INTEGRITY_STATUS" == "SKIP" ]; then
-  printf "      → sqlite3 not available in VM, skipped\n"
-fi
-
-printf "    %-40s [%s]\n" "Large file integrity (SHA256)" "$EPHEMERAL_LARGE_FILE_STATUS"
-if [ "$EPHEMERAL_LARGE_FILE_STATUS" == "FAIL" ]; then
-  echo "      → SHA256 mismatch or file missing"
-  echo "      → Expected for cold migration (vda recreated)"
-fi
-echo ""
-
-# --- PROCESS CONTINUITY ---
-echo "┌─────────────────────────────────────────────────────────────────────────────┐"
-echo "│ PROCESS CONTINUITY & SERVICES                                               │"
-echo "└─────────────────────────────────────────────────────────────────────────────┘"
-echo ""
-printf "    %-40s [%s]\n" "All workload services running" "$SERVICES_RUNNING_STATUS"
-if [ "$SERVICES_RUNNING_STATUS" == "FAIL" ]; then
-  echo "      → Stopped services detected:"
-  [ "$(get_val FILE_WRITER_PID)" == "none" ] && echo "        • file-writer (persistent)"
-  [ "$(get_val SQLITE_PID)" == "none" ] && echo "        • sqlite-writer (persistent)"
-  [ "$(get_val HTTP_PID)" == "none" ] && echo "        • http-server"
-  [ "$(get_val EPHEMERAL_FILE_WRITER_PID)" == "none" ] && echo "        • file-writer (ephemeral)"
-  [ "$(get_val EPHEMERAL_SQLITE_PID)" == "none" ] && echo "        • sqlite-writer (ephemeral)"
-fi
-echo ""
-
-echo "  Migration Type: ${MIGRATION_TYPE}"
-echo "    File-writer PID:  $(get_val FILE_WRITER_PID) (${FILE_WRITER_PID_MATCH})"
-echo "    SQLite PID:       $(get_val SQLITE_PID) (${SQLITE_PID_MATCH})"
-echo "    HTTP PID:         $(get_val HTTP_PID) (${HTTP_PID_MATCH})"
-echo ""
-
-# --- OVERALL VERDICT ---
-OVERALL="PASS"
-if [ "$FILE_WRITER_DIFF" -lt 0 ] || [ "$SQLITE_DIFF" -lt 0 ]; then
-  OVERALL="FAIL"
-fi
-if [ "$(get_val SQLITE_INTEGRITY)" != "ok" ] && [ "$(get_val SQLITE_INTEGRITY)" != "unknown" ]; then
-  OVERALL="FAIL"
-fi
-if [ "$HAS_PRE" == "true" ] && [ "$LOG_FILE_INTACT" != "true" ]; then
-  OVERALL="FAIL"
-fi
-if [ "$HAS_PRE" == "true" ] && [ "$DB_FILE_INTACT" != "true" ]; then
-  if [[ "$MIGRATION_TYPE" == live* ]]; then
-    log.warn "SQLite DB prefix SHA256 mismatch (expected for live migration — WAL/page reorg)"
+  CROND_STATUS_CHECK="PASS"
+  if [[ "$HAS_PRE" == "true" ]]; then
+    if [[ "$PRE_CROND_STATUS" == "inactive" ]] && [[ "$(get_val CROND_STATUS)" == "inactive" ]]; then
+      CROND_STATUS_CHECK="SKIP"
+    elif [[ "$(get_val CROND_STATUS)" != "active" ]]; then
+      CROND_STATUS_CHECK="FAIL"
+    fi
   else
+    [[ "$(get_val CROND_STATUS)" != "active" ]] && CROND_STATUS_CHECK="FAIL"
+  fi
+
+  SERVICES_RUNNING_STATUS="PASS"
+  if [[ "$(get_val FILE_WRITER_PID)" == "none" ]] || \
+     [[ "$(get_val SQLITE_PID)" == "none" ]] || \
+     [[ "$(get_val HTTP_PID)" == "none" ]] || \
+     [[ "$(get_val EPHEMERAL_FILE_WRITER_PID)" == "none" ]] || \
+     [[ "$(get_val EPHEMERAL_SQLITE_PID)" == "none" ]]; then
+    SERVICES_RUNNING_STATUS="FAIL"
+  fi
+
+  OVERALL="PASS"
+  if [[ "$FILE_WRITER_DIFF" -lt 0 ]] || [[ "$SQLITE_DIFF" -lt 0 ]]; then
     OVERALL="FAIL"
   fi
-fi
-if [ "$HTTP_STATUS_CHECK" == "FAIL" ] || [ "$SERVICES_RUNNING_STATUS" == "FAIL" ]; then
-  OVERALL="FAIL"
-fi
+  if [[ "$(get_val SQLITE_INTEGRITY)" != "ok" ]] && [[ "$(get_val SQLITE_INTEGRITY)" != "unknown" ]]; then
+    OVERALL="FAIL"
+  fi
+  if [[ "$HAS_PRE" == "true" ]] && [[ "$LOG_FILE_INTACT" != "true" ]]; then
+    OVERALL="FAIL"
+  fi
+  if [[ "$HAS_PRE" == "true" ]] && [[ "$DB_FILE_INTACT" != "true" ]]; then
+    if [[ "$MIGRATION_TYPE" == live* ]]; then
+      log.warn "SQLite DB prefix SHA256 mismatch (expected for live migration — WAL/page reorg)"
+    else
+      OVERALL="FAIL"
+    fi
+  fi
+  if [[ "$HTTP_STATUS_CHECK" == "FAIL" ]] || [[ "$SERVICES_RUNNING_STATUS" == "FAIL" ]]; then
+    OVERALL="FAIL"
+  fi
+}
 
-echo "OVERALL_VERDICT=${OVERALL}" > "${OUTPUT_FILE}.verdict"
+print_verdict_summary() {
+  echo "╔════════════════════════════════════════════════════════════════════════════╗"
+  echo "║                      POST-MIGRATION VALIDATION SUMMARY                     ║"
+  echo "╚════════════════════════════════════════════════════════════════════════════╝"
+  echo ""
+  echo "┌─────────────────────────────────────────────────────────────────────────────┐"
+  echo "│ PERSISTENT DISK (/dev/vdc → /data/)                                        │"
+  echo "└─────────────────────────────────────────────────────────────────────────────┘"
+  echo ""
+  echo "  Data Integrity:"
+  printf "    %-40s [%s]\n" "File-writer data continuity" "$PERSISTENT_FILE_WRITER_STATUS"
+  [[ "$PERSISTENT_FILE_WRITER_STATUS" == "FAIL" ]] && printf "      → Data loss detected: %d lines lost\n" "$((0 - FILE_WRITER_DIFF))"
+  printf "    %-40s [%s]\n" "SQLite data continuity" "$PERSISTENT_SQLITE_STATUS"
+  [[ "$PERSISTENT_SQLITE_STATUS" == "FAIL" ]] && printf "      → Data loss detected: %d rows lost\n" "$((0 - SQLITE_DIFF))"
+  printf "    %-40s [%s]\n" "SQLite database integrity" "$PERSISTENT_SQLITE_INTEGRITY_STATUS"
+  [[ "$PERSISTENT_SQLITE_INTEGRITY_STATUS" == "FAIL" ]] && printf "      → Integrity check result: %s\n" "$(get_val SQLITE_INTEGRITY)"
+  [[ "$PERSISTENT_SQLITE_INTEGRITY_STATUS" == "SKIP" ]] && printf "      → sqlite3 not available in VM, skipped\n"
+  printf "    %-40s [%s]\n" "Cron log continuity" "$PERSISTENT_CRON_STATUS"
+  [[ "$PERSISTENT_CRON_STATUS" == "FAIL" ]] && printf "      → Data loss detected: %d entries lost\n" "$((0 - CRON_DIFF))"
+  printf "    %-40s [%s]\n" "Large file integrity (SHA256)" "$PERSISTENT_LARGE_FILE_STATUS"
+  if [[ "$PERSISTENT_LARGE_FILE_STATUS" == "FAIL" ]]; then
+    echo "      → SHA256 mismatch detected"
+    echo "      → Pre:  ${PRE_LARGE_FILE_SHA256}"
+    echo "      → Post: ${POST_LARGE_FILE_SHA256}"
+  fi
+  echo ""
+  echo "  Services:"
+  printf "    %-40s [%s]\n" "HTTP server responding (port 8080)" "$HTTP_STATUS_CHECK"
+  [[ "$HTTP_STATUS_CHECK" == "FAIL" ]] && printf "      → HTTP response code: %s (expected: 200)\n" "$(get_val HTTP_STATUS)"
+  printf "    %-40s [%s]\n" "Cron daemon active" "$CROND_STATUS_CHECK"
+  [[ "$CROND_STATUS_CHECK" == "FAIL" ]] && printf "      → Crond status: %s (expected: active)\n" "$(get_val CROND_STATUS)"
+  [[ "$CROND_STATUS_CHECK" == "SKIP" ]] && printf "      → Was inactive pre-migration, unchanged\n"
+  echo ""
+  echo "┌─────────────────────────────────────────────────────────────────────────────┐"
+  echo "│ EPHEMERAL DISK (/dev/vda → /var/lib/test-ephemeral/)                       │"
+  echo "└─────────────────────────────────────────────────────────────────────────────┘"
+  echo ""
+  echo "  Data Integrity:"
+  printf "    %-40s [%s]\n" "File-writer data continuity" "$EPHEMERAL_FILE_WRITER_STATUS"
+  if [[ "$EPHEMERAL_FILE_WRITER_STATUS" == "FAIL" ]]; then
+    printf "      → Data loss detected: %d lines lost\n" "$((0 - EPHEMERAL_FILE_WRITER_DIFF))"
+    echo "      → Expected for cold migration (vda recreated)"
+  fi
+  printf "    %-40s [%s]\n" "SQLite data continuity" "$EPHEMERAL_SQLITE_STATUS"
+  if [[ "$EPHEMERAL_SQLITE_STATUS" == "FAIL" ]]; then
+    printf "      → Data loss detected: %d rows lost\n" "$((0 - EPHEMERAL_SQLITE_DIFF))"
+    echo "      → Expected for cold migration (vda recreated)"
+  fi
+  printf "    %-40s [%s]\n" "SQLite database integrity" "$EPHEMERAL_SQLITE_INTEGRITY_STATUS"
+  [[ "$EPHEMERAL_SQLITE_INTEGRITY_STATUS" == "FAIL" ]] && printf "      → Integrity check result: %s\n" "$(get_val EPHEMERAL_SQLITE_INTEGRITY)"
+  [[ "$EPHEMERAL_SQLITE_INTEGRITY_STATUS" == "SKIP" ]] && printf "      → sqlite3 not available in VM, skipped\n"
+  printf "    %-40s [%s]\n" "Large file integrity (SHA256)" "$EPHEMERAL_LARGE_FILE_STATUS"
+  if [[ "$EPHEMERAL_LARGE_FILE_STATUS" == "FAIL" ]]; then
+    echo "      → SHA256 mismatch or file missing"
+    echo "      → Expected for cold migration (vda recreated)"
+  fi
+  echo ""
+  echo "┌─────────────────────────────────────────────────────────────────────────────┐"
+  echo "│ PROCESS CONTINUITY & SERVICES                                               │"
+  echo "└─────────────────────────────────────────────────────────────────────────────┘"
+  echo ""
+  printf "    %-40s [%s]\n" "All workload services running" "$SERVICES_RUNNING_STATUS"
+  if [[ "$SERVICES_RUNNING_STATUS" == "FAIL" ]]; then
+    echo "      → Stopped services detected:"
+    [[ "$(get_val FILE_WRITER_PID)" == "none" ]] && echo "        • file-writer (persistent)"
+    [[ "$(get_val SQLITE_PID)" == "none" ]] && echo "        • sqlite-writer (persistent)"
+    [[ "$(get_val HTTP_PID)" == "none" ]] && echo "        • http-server"
+    [[ "$(get_val EPHEMERAL_FILE_WRITER_PID)" == "none" ]] && echo "        • file-writer (ephemeral)"
+    [[ "$(get_val EPHEMERAL_SQLITE_PID)" == "none" ]] && echo "        • sqlite-writer (ephemeral)"
+  fi
+  echo ""
+  echo "  Migration Type: ${MIGRATION_TYPE}"
+  echo "    File-writer PID:  $(get_val FILE_WRITER_PID) (${FILE_WRITER_PID_MATCH})"
+  echo "    SQLite PID:       $(get_val SQLITE_PID) (${SQLITE_PID_MATCH})"
+  echo "    HTTP PID:         $(get_val HTTP_PID) (${HTTP_PID_MATCH})"
+  echo ""
 
-if [ "$OVERALL" == "PASS" ]; then
-  log.box "MIGRATION VALIDATION PASSED"
-  log.success "Persistent data preserved (lines, rows, log/db SHA prefix)"
-  log.success "All workload services running"
-  exit 0
-else
+  echo "OVERALL_VERDICT=${OVERALL}" > "${OUTPUT_FILE}.verdict"
+
+  if [[ "$OVERALL" == "PASS" ]]; then
+    log.box "MIGRATION VALIDATION PASSED"
+    log.success "Persistent data preserved (lines, rows, log/db SHA prefix)"
+    log.success "All workload services running"
+    exit 0
+  fi
+
   log.box "MIGRATION VALIDATION FAILED"
-  [ "$PERSISTENT_FILE_WRITER_STATUS" == "FAIL" ] && log.error "Persistent file-writer data loss"
-  [ "$PERSISTENT_SQLITE_STATUS" == "FAIL" ] && log.error "Persistent SQLite data loss"
-  [ "$LOG_FILE_INTACT" != "true" ] && log.error "Log file prefix SHA256 mismatch"
-  [ "$DB_FILE_INTACT" != "true" ] && log.error "SQLite DB prefix SHA256 mismatch"
-  [ "$HTTP_STATUS_CHECK" == "FAIL" ] && log.error "HTTP server not responding"
-  [ "$SERVICES_RUNNING_STATUS" == "FAIL" ] && log.error "Some workload services not running"
+  [[ "$PERSISTENT_FILE_WRITER_STATUS" == "FAIL" ]] && log.error "Persistent file-writer data loss"
+  [[ "$PERSISTENT_SQLITE_STATUS" == "FAIL" ]] && log.error "Persistent SQLite data loss"
+  [[ "$LOG_FILE_INTACT" != "true" ]] && log.error "Log file prefix SHA256 mismatch"
+  [[ "$DB_FILE_INTACT" != "true" ]] && log.error "SQLite DB prefix SHA256 mismatch"
+  [[ "$HTTP_STATUS_CHECK" == "FAIL" ]] && log.error "HTTP server not responding"
+  [[ "$SERVICES_RUNNING_STATUS" == "FAIL" ]] && log.error "Some workload services not running"
   exit 1
+}
+
+# ── Argument parsing ──────────────────────────────────────────
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --kubeconfig)          KUBECONFIG_PATH="$2"; shift 2 ;;
+    --vm)                  VM_NAME="$2"; shift 2 ;;
+    --namespace)           NAMESPACE="$2"; shift 2 ;;
+    --ssh-key)             SSH_KEY="$2"; shift 2 ;;
+    --ssh-user)            SSH_USER="$2"; shift 2 ;;
+    --output-dir)          OUTPUT_DIR="$2"; shift 2 ;;
+    --pre-migration-file)  PRE_MIGRATION_FILE="$2"; shift 2 ;;
+    --local-ssh-opts)      LOCAL_SSH_OPTS="$2"; shift 2 ;;
+    --ssh-ready-timeout)   SSH_READY_TIMEOUT="$2"; shift 2 ;;
+    --chaos-scenario)      CHAOS_SCENARIO="$2"; shift 2 ;;
+    --migration-profile)   MIGRATION_PROFILE="$2"; shift 2 ;;
+    --cluster-role)        CLUSTER_ROLE="$2"; shift 2 ;;
+    *) echo "Unknown option: $1"; usage ;;
+  esac
+done
+
+[[ -z "$KUBECONFIG_PATH" ]] && { echo "ERROR: --kubeconfig is required"; usage; }
+[[ -z "$VM_NAME" ]] && { echo "ERROR: --vm is required"; usage; }
+
+source "${SCRIPT_DIR}/lib/log.sh"
+source "${SCRIPT_DIR}/lib/executor.sh"
+source "${SCRIPT_DIR}/lib/ssh.sh"
+source "${SCRIPT_DIR}/lib/vm-data-collector.sh"
+
+MIGRATION_PROFILE="${MIGRATION_PROFILE:-gcp}"
+CLUSTER_ROLE="${CLUSTER_ROLE:-target}"
+
+executor_load_profile "$MIGRATION_PROFILE" "$SCRIPT_DIR"
+if [[ "$MIGRATION_PROFILE" == "gcp" ]]; then
+  executor_init "" "$KUBECONFIG_PATH"
 fi
+
+VM_CLUSTER="$CLUSTER_ROLE"
+mkdir -p "$OUTPUT_DIR"
+
+TIMESTAMP=$(date -u '+%Y%m%dT%H%M%SZ')
+OUTPUT_FILE="${OUTPUT_DIR}/post-migration-${VM_NAME}-${TIMESTAMP}.json"
+
+log.verbose "Post-Migration Check: ${VM_NAME} (${TIMESTAMP})"
+
+# ── Main pipeline ─────────────────────────────────────────────
+parse_pre_migration_sizes
+collect_cluster_info
+if ! wait_for_guest_ssh; then
+  emit_partial_report_and_exit
+fi
+collect_vm_workload_data
+validate_vm_data
+run_gap_analysis
+load_pre_migration_baseline
+compute_comparisons
+build_report_json
+print_gap_summary
+compute_verdict
+print_verdict_summary

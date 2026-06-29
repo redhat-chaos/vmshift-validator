@@ -20,7 +20,7 @@ SSH_KEY="${PROJECT_DIR}/keys/kube-burner"
 SSH_USER="fedora"
 VM_LABEL_SELECTOR="workload-type=services-test"
 STABILIZE_WAIT=5
-WORKLOAD_TIMEOUT=60
+WORKLOAD_TIMEOUT=180
 SSH_READY_TIMEOUT=600
 LOCAL_SSH_OPTS="-o StrictHostKeyChecking=accept-new"
 
@@ -130,7 +130,7 @@ stabilize_vm() {
   while (( $(date +%s) - stab_start < WORKLOAD_TIMEOUT )); do
     stab_out=$(run_on_vm "
       LINES=\$(wc -l < /data/test/log.txt 2>/dev/null || echo 0)
-      ROWS=\$(sqlite3 /data/test.db 'SELECT count(*) FROM test;' 2>/dev/null || echo 0)
+      ROWS=\$(python3 -c 'import sqlite3; c=sqlite3.connect(\"/data/test.db\"); print(c.execute(\"SELECT count(*) FROM test\").fetchone()[0])' 2>/dev/null || echo 0)
       echo \"\$LINES \$ROWS\"
     " 2>/dev/null || echo "0 0")
     stab_lines=$(echo "$stab_out" | awk '{print $1}')

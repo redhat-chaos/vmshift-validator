@@ -40,6 +40,7 @@ _SSH_CONTROL_OPTS=(
   -o "ControlMaster=auto"
   -o "ControlPath=/tmp/cclm-ssh-%r@%h:%p"
   -o "ControlPersist=300"
+  -o "ConnectTimeout=30"
   -o "StrictHostKeyChecking=no"
   -o "UserKnownHostsFile=/dev/null"
 )

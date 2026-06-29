@@ -114,12 +114,30 @@ bool_json() {
   [[ "$1" == "true" ]] && echo true || echo false
 }
 
+safe_num() {
+  local val="${1:-0}"
+  if [[ "$val" =~ ^-?[0-9]+\.?[0-9]*$ ]]; then
+    echo "$val"
+  else
+    echo "0"
+  fi
+}
+
+safe_json() {
+  local val="${1:-${2:-0}}"
+  if echo "$val" | head -1 | jq -c . >/dev/null 2>&1; then
+    echo "$val" | head -1 | jq -c .
+  else
+    echo "${2:-0}"
+  fi
+}
+
 json_or_empty_array() {
-  echo "${1:-[]}" | jq -c . 2>/dev/null || echo '[]'
+  echo "${1:-[]}" | head -1 | jq -c . 2>/dev/null || echo '[]'
 }
 
 json_or_empty_object() {
-  echo "${1:-{}}" | jq -c . 2>/dev/null || echo '{}'
+  echo "${1:-{}}" | head -1 | jq -c . 2>/dev/null || echo '{}'
 }
 
 get_val() {
@@ -480,6 +498,22 @@ build_report_json() {
   large_intact_json=$(bool_json "$LARGE_DATA_INTACT")
   eph_large_intact_json=$(bool_json "$EPHEMERAL_DATA_INTACT")
 
+
+
+  # Sanitize all JSON variables for --argjson
+  FILE_WRITER_GAP_DATA=$(echo "$FILE_WRITER_GAP_DATA" | head -1 | jq -c . 2>/dev/null || echo '[]')
+  SQLITE_GAP_DATA=$(echo "$SQLITE_GAP_DATA" | head -1 | jq -c . 2>/dev/null || echo '[]')
+  EPHEMERAL_FILE_WRITER_GAP_DATA=$(echo "$EPHEMERAL_FILE_WRITER_GAP_DATA" | head -1 | jq -c . 2>/dev/null || echo '[]')
+  CRON_GAP_DATA=$(echo "$CRON_GAP_DATA" | head -1 | jq -c . 2>/dev/null || echo '[]')
+  AFFECTED_WINDOWS=$(echo "$AFFECTED_WINDOWS" | head -1 | jq -c . 2>/dev/null || echo '{}')
+  JITTER_COUNT=$(echo "${JITTER_COUNT:-0}" | tr -dc '0-9' || echo 0)
+  [[ -z "$JITTER_COUNT" ]] && JITTER_COUNT=0
+  POST_FILE_WRITER_LINES=${POST_FILE_WRITER_LINES:-0}
+  POST_SQLITE_ROWS=${POST_SQLITE_ROWS:-0}
+  POST_CRON_LINES=${POST_CRON_LINES:-0}
+  POST_EPHEMERAL_FILE_WRITER_LINES=${POST_EPHEMERAL_FILE_WRITER_LINES:-0}
+  POST_EPHEMERAL_SQLITE_ROWS=${POST_EPHEMERAL_SQLITE_ROWS:-0}
+
   jq -n \
     --arg type "post-migration" \
     --arg vm_name "$VM_NAME" \
@@ -507,7 +541,7 @@ build_report_json() {
     --argjson sqlite_gaps_gt2 "$(get_val SQLITE_GAPS_GT2)" \
     --argjson sqlite_max_gap "$(get_val SQLITE_MAX_GAP)" \
     --argjson sqlite_affected "$AFFECTED_WINDOWS" \
-    --argjson sqlite_jitter "$JITTER_COUNT" \
+    --argjson sqlite_jitter "$(safe_num "$JITTER_COUNT")" \
     --argjson sqlite_gap "$SQLITE_GAP_DATA" \
     --arg crond_status "$(get_val CROND_STATUS)" \
     --arg crontab_entry "$(get_val CRONTAB_ENTRY)" \

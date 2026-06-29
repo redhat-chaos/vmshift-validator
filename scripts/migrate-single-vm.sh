@@ -10,7 +10,6 @@ PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 source "${SCRIPT_DIR}/lib/log.sh"
 source "${SCRIPT_DIR}/lib/executor.sh"
-source "${SCRIPT_DIR}/lib/k8s.sh"
 source "${SCRIPT_DIR}/lib/ssh.sh"
 
 SOURCE_KUBECONFIG=""

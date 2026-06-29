@@ -77,25 +77,6 @@ log.debug() {
 }
 
 # ═══════════════════════════════════════════════════════════════
-# Level-gated output — STDERR
-# For scripts where stdout carries machine data (JSON).
-# ═══════════════════════════════════════════════════════════════
-
-log.info_err() {
-  printf '%s\n' "$*" >&2
-}
-
-log.verbose_err() {
-  [[ "$LOG_LEVEL" -ge 2 ]] || return 0
-  printf "   $(_c 2 "$_C_DIM")%s$(_c 2 "$_C_RESET")\n" "$*" >&2
-}
-
-log.debug_err() {
-  [[ "$LOG_LEVEL" -ge 3 ]] || return 0
-  printf "   $(_c 2 "$_C_DIM")[DEBUG %s] %s$(_c 2 "$_C_RESET")\n" "$(_ts)" "$*" >&2
-}
-
-# ═══════════════════════════════════════════════════════════════
 # Status markers
 # ═══════════════════════════════════════════════════════════════
 
@@ -197,7 +178,6 @@ task.fail() {
 #
 # Usage:
 #   progress.update "DiskTransfer" "3/7 steps (2m34s)"
-#   progress.done   "DiskTransfer"
 # ═══════════════════════════════════════════════════════════════
 
 progress.update() {
@@ -207,67 +187,6 @@ progress.update() {
   local dots
   dots=$(_dots "$label" 35)
   printf "\r   ├── %s %s $(_c 1 "$_C_CYAN")⏳$(_c 1 "$_C_RESET") %s" "$label" "$dots" "$detail"
-}
-
-progress.done() {
-  [[ "$LOG_LEVEL" -ge 2 ]] || return 0
-  local label="$1"
-  local dots
-  dots=$(_dots "$label" 35)
-  if [[ -t 1 ]]; then
-    printf "\r   ├── %s %s $(_c 1 "$_C_GREEN")✓$(_c 1 "$_C_RESET")                    \n" "$label" "$dots"
-  else
-    printf "   ├── %s %s $(_c 1 "$_C_GREEN")✓$(_c 1 "$_C_RESET")\n" "$label" "$dots"
-  fi
-}
-
-# ═══════════════════════════════════════════════════════════════
-# Failure context auto-expansion
-#
-# Call log.enable_failure_context at the top of orchestrator
-# scripts (run-e2e.sh). On any ERR, it dumps the last N lines
-# so the operator doesn't need to re-run with verbose.
-#
-# This uses a tee to capture output. Do NOT enable in scripts
-# that separate stdout/stderr (capture-prometheus-metrics.sh).
-# ═══════════════════════════════════════════════════════════════
-
-_LOG_TEE_FILE=""
-_LOG_FAILURE_CONTEXT_ENABLED=0
-
-log.enable_failure_context() {
-  _LOG_FAILURE_CONTEXT_ENABLED=1
-  _LOG_TEE_FILE=$(mktemp "${TMPDIR:-/tmp}/pipeline-log.XXXXXX")
-
-  _log_on_error() {
-    local exit_code=$?
-    [[ "$_LOG_FAILURE_CONTEXT_ENABLED" == "1" ]] || return 0
-    [[ $exit_code -ne 0 ]] || return 0
-    printf '\n' >&2
-    printf "$(_c 2 "$_C_RED")┌─────────────────────────────────────────────────────┐$(_c 2 "$_C_RESET")\n" >&2
-    printf "$(_c 2 "$_C_RED")│  FAILURE CONTEXT (auto-expanded)                    │$(_c 2 "$_C_RESET")\n" >&2
-    printf "$(_c 2 "$_C_RED")├─────────────────────────────────────────────────────┤$(_c 2 "$_C_RESET")\n" >&2
-    if [[ -s "$_LOG_TEE_FILE" ]]; then
-      tail -30 "$_LOG_TEE_FILE" | while IFS= read -r line; do
-        printf "$(_c 2 "$_C_DIM")│  %s$(_c 2 "$_C_RESET")\n" "$line" >&2
-      done
-    fi
-    printf "$(_c 2 "$_C_RED")├─────────────────────────────────────────────────────┤$(_c 2 "$_C_RESET")\n" >&2
-    printf "$(_c 2 "$_C_RED")│  Full log: %s$(_c 2 "$_C_RESET")\n" "$_LOG_TEE_FILE" >&2
-    if [[ "$LOG_LEVEL" -lt 2 ]]; then
-      printf "$(_c 2 "$_C_RED")│  Re-run with LOG_LEVEL=2 for step-by-step detail   │$(_c 2 "$_C_RESET")\n" >&2
-    fi
-    printf "$(_c 2 "$_C_RED")└─────────────────────────────────────────────────────┘$(_c 2 "$_C_RESET")\n" >&2
-  }
-  trap '_log_on_error' ERR
-
-  exec > >(tee -a "$_LOG_TEE_FILE") 2> >(tee -a "$_LOG_TEE_FILE" >&2)
-}
-
-log.cleanup_failure_context() {
-  if [[ -n "$_LOG_TEE_FILE" && -f "$_LOG_TEE_FILE" ]]; then
-    rm -f "$_LOG_TEE_FILE" 2>/dev/null || true
-  fi
 }
 
 # ═══════════════════════════════════════════════════════════════

@@ -4,7 +4,7 @@
 # GCP mode: direct local kubeconfig access.
 # Baremetal-L2 mode: route commands through SSH bastions (double-hop for target).
 #
-# Requires lib/log.sh for ensure_bastion_tools diagnostics (optional).
+# Requires lib/log.sh for diagnostics.
 
 [[ -n "${_EXECUTOR_SH_LOADED:-}" ]] && return 0
 _EXECUTOR_SH_LOADED=1
@@ -15,9 +15,6 @@ MIGRATION_API="${MIGRATION_API:-source}"
 PROVIDER_SOURCE_NAME="${PROVIDER_SOURCE_NAME:-host}"
 PROVIDER_DEST_NAME="${PROVIDER_DEST_NAME:-green-cluster}"
 STORAGE_CLASS="${STORAGE_CLASS:-standard-csi}"
-POD_RESTART_NAMESPACES_SOURCE="${POD_RESTART_NAMESPACES_SOURCE:-openshift-cnv openshift-mtv submariner-operator}"
-POD_RESTART_NAMESPACES_TARGET="${POD_RESTART_NAMESPACES_TARGET:-openshift-cnv openshift-mtv submariner-operator}"
-
 # GCP kubeconfig paths (set by executor_init)
 EXECUTOR_SOURCE_KUBECONFIG="${EXECUTOR_SOURCE_KUBECONFIG:-}"
 EXECUTOR_TARGET_KUBECONFIG="${EXECUTOR_TARGET_KUBECONFIG:-}"
@@ -298,31 +295,3 @@ executor_cluster_server() {
   fi
 }
 
-ensure_bastion_tools() {
-  if ! executor_is_baremetal; then
-    return 0
-  fi
-
-  local missing=0
-  local tools=("kubectl" "virtctl")
-  local tool
-
-  for tool in "${tools[@]}"; do
-    if ! _executor_run_source_shell "command -v ${tool} >/dev/null 2>&1"; then
-      echo "ERROR: ${tool} not found on source bastion (${SOURCE_BASTION})" >&2
-      missing=1
-    fi
-    if ! _executor_run_target_shell "command -v ${tool} >/dev/null 2>&1"; then
-      echo "ERROR: ${tool} not found on target bastion (${TARGET_BASTION})" >&2
-      missing=1
-    fi
-  done
-
-  if [[ "$missing" -ne 0 ]]; then
-    echo "" >&2
-    echo "Install virtctl on both bastions. Download from your cluster's ConsoleCLIDownload route:" >&2
-    echo "  oc get consoleclidownload virtctl-clidownloads -o jsonpath='{.spec.links[?(@.text==\"Download virtctl for Linux for x86_64\")].href}'" >&2
-    echo "  curl -kL <URL_FROM_ABOVE> | tar xzf - -C /usr/local/bin/" >&2
-    return 1
-  fi
-}

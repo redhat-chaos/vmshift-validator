@@ -26,10 +26,9 @@ vmshift-validator/
 ├── config.example.yaml           # Config template (committed)
 ├── config.yaml                   # User config (gitignored, created via `make init-config`)
 ├── .config.mk                    # Auto-generated from config.yaml (gitignored)
-├── config/
-│   └── env.sh                    # Shell-level default exports
 ├── profiles/
-│   └── baremetal-l2.env          # Bastion SSH hop profile for bare metal labs
+│   ├── baremetal-l2.env          # Bastion SSH hop profile (gitignored)
+│   └── baremetal-l2.env.example  # Template for bastion config (committed)
 ├── kube-burner/
 │   ├── vm-services.yml           # Default density job (5 Fedora VMs)
 │   ├── kubevirt-density.yml      # Multi-OS density job (CentOS/Fedora/Ubuntu)
@@ -51,7 +50,6 @@ vmshift-validator/
 │   └── lib/
 │       ├── executor.sh           # Profile-aware kubectl/virtctl routing (gcp vs baremetal-l2)
 │       ├── ssh.sh                # virtctl ssh helpers (run_on_vm, wait_for_guest_ssh)
-│       ├── k8s.sh                # Kubernetes helpers
 │       └── log.sh                # Structured logging with verbosity levels
 ├── templates/
 │   ├── migration-plan.yaml.template   # Forklift Plan template (REPLACE_* placeholders)
@@ -67,7 +65,6 @@ vmshift-validator/
 1. **CLI overrides** — `make density-setup NAMESPACE=my-ns`
 2. **config.yaml** — User-specific values (gitignored), parsed via `yq` into `.config.mk`
 3. **Makefile defaults** — `?=` assignments in `Makefile`
-4. **config/env.sh** — Shell-level fallback defaults
 
 ### Migration Profiles
 

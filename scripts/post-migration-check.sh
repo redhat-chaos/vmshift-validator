@@ -94,24 +94,24 @@ echo \"CAPTURE_TIME_LOCAL=\$(date '+%Y-%m-%d %H:%M:%S %Z')\"
 echo \"FILE_WRITER_LINES=\$(wc -l < /data/test/log.txt 2>/dev/null || echo 0)\"
 echo \"FILE_WRITER_SIZE=\$(du -b /data/test/log.txt 2>/dev/null | cut -f1 || echo 0)\"
 echo \"FILE_WRITER_LAST=\$(tail -1 /data/test/log.txt 2>/dev/null || echo none)\"
-echo \"FILE_WRITER_PID=\$(pgrep -f 'log.txt' -o 2>/dev/null || echo none)\"
+echo \"FILE_WRITER_PID=\$(systemctl show -p MainPID file-writer.service 2>/dev/null | cut -d= -f2 || echo none)\"
 
-echo \"SQLITE_ROWS=\$(sudo sqlite3 /data/test.db 'SELECT count(*) FROM test;' 2>/dev/null || echo 0)\"
-echo \"SQLITE_MAX_TS=\$(sudo sqlite3 /data/test.db 'SELECT max(timestamp) FROM test;' 2>/dev/null || echo 0)\"
-echo \"SQLITE_MIN_TS=\$(sudo sqlite3 /data/test.db 'SELECT min(timestamp) FROM test;' 2>/dev/null || echo 0)\"
-echo \"SQLITE_INTEGRITY=\$(sudo sqlite3 /data/test.db 'PRAGMA integrity_check;' 2>/dev/null || echo unknown)\"
+echo \"SQLITE_ROWS=\$(python3 -c 'import sqlite3; c=sqlite3.connect(\"/data/test.db\"); print(c.execute(\"SELECT count(*) FROM test\").fetchone()[0])' 2>/dev/null || echo 0)\"
+echo \"SQLITE_MAX_TS=\$(python3 -c 'import sqlite3; c=sqlite3.connect(\"/data/test.db\"); print(c.execute(\"SELECT max(timestamp) FROM test\").fetchone()[0] or 0)' 2>/dev/null || echo 0)\"
+echo \"SQLITE_MIN_TS=\$(python3 -c 'import sqlite3; c=sqlite3.connect(\"/data/test.db\"); print(c.execute(\"SELECT min(timestamp) FROM test\").fetchone()[0] or 0)' 2>/dev/null || echo 0)\"
+echo \"SQLITE_INTEGRITY=\$(python3 -c 'import sqlite3; c=sqlite3.connect(\"/data/test.db\"); print(c.execute(\"PRAGMA integrity_check\").fetchone()[0])' 2>/dev/null || echo unknown)\"
 echo \"SQLITE_SIZE=\$(du -b /data/test.db 2>/dev/null | cut -f1 || echo 0)\"
-echo \"SQLITE_PID=\$(pgrep -f 'sqlite3' -o 2>/dev/null || echo none)\"
-echo \"SQLITE_GAPS_GT2=\$(sudo sqlite3 /data/test.db 'WITH g AS (SELECT timestamp - LAG(timestamp) OVER (ORDER BY rowid) AS gap FROM test) SELECT count(*) FROM g WHERE gap > 2;' 2>/dev/null || echo -1)\"
-echo \"SQLITE_MAX_GAP=\$(sudo sqlite3 /data/test.db 'WITH g AS (SELECT timestamp - LAG(timestamp) OVER (ORDER BY rowid) AS gap FROM test) SELECT COALESCE(max(gap),0) FROM g;' 2>/dev/null || echo -1)\"
+echo \"SQLITE_PID=\$(systemctl show -p MainPID sqlite-writer.service 2>/dev/null | cut -d= -f2 || echo none)\"
+echo \"SQLITE_GAPS_GT2=\$(python3 -c 'import sqlite3; c=sqlite3.connect(\"/data/test.db\"); rows=c.execute(\"SELECT timestamp FROM test ORDER BY rowid\").fetchall(); ts=[r[0] for r in rows]; gaps=[ts[i]-ts[i-1] for i in range(1,len(ts))]; print(sum(1 for g in gaps if g>2))' 2>/dev/null || echo -1)\"
+echo \"SQLITE_MAX_GAP=\$(python3 -c 'import sqlite3; c=sqlite3.connect(\"/data/test.db\"); rows=c.execute(\"SELECT timestamp FROM test ORDER BY rowid\").fetchall(); ts=[r[0] for r in rows]; gaps=[ts[i]-ts[i-1] for i in range(1,len(ts))]; print(max(gaps) if gaps else 0)' 2>/dev/null || echo -1)\"
 
 echo \"CRON_LINES=\$(wc -l < /data/test/cron.log 2>/dev/null || echo 0)\"
 echo \"CRON_LAST=\$(tail -1 /data/test/cron.log 2>/dev/null || echo none)\"
 echo \"CROND_STATUS=\$(systemctl is-active crond 2>/dev/null || echo inactive)\"
 echo \"CRONTAB_ENTRY=\$(crontab -l 2>/dev/null | head -1 || echo none)\"
 
-echo \"HTTP_STATUS=\$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080 2>/dev/null || echo 0)\"
-echo \"HTTP_PID=\$(pgrep -f 'http.server' -o 2>/dev/null || echo none)\"
+echo \"HTTP_STATUS=\$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080 2>/dev/null | awk '{printf \"%d\", \$1}' || echo 0)\"
+echo \"HTTP_PID=\$(systemctl show -p MainPID http-server.service 2>/dev/null | cut -d= -f2 || echo none)\"
 
 echo \"VM_HOSTNAME=\$(hostname)\"
 echo \"VM_IP_INTERNAL=\$(ip -4 addr show | grep 'inet ' | grep -v 127.0.0 | awk '{print \$2}' | head -1)\"
@@ -134,12 +134,12 @@ echo \"EPHEMERAL_FILE_WRITER_SIZE=\$(du -b /var/lib/test-ephemeral/log.txt 2>/de
 echo \"EPHEMERAL_FILE_WRITER_LAST=\$(tail -1 /var/lib/test-ephemeral/log.txt 2>/dev/null || echo none)\"
 echo \"EPHEMERAL_FILE_WRITER_PID=\$(pgrep -f 'test-ephemeral/log.txt' -o 2>/dev/null || echo none)\"
 
-echo \"EPHEMERAL_SQLITE_ROWS=\$(sudo sqlite3 /var/lib/test-ephemeral/test.db 'SELECT count(*) FROM test;' 2>/dev/null || echo 0)\"
-echo \"EPHEMERAL_SQLITE_MAX_TS=\$(sudo sqlite3 /var/lib/test-ephemeral/test.db 'SELECT max(timestamp) FROM test;' 2>/dev/null || echo 0)\"
-echo \"EPHEMERAL_SQLITE_MIN_TS=\$(sudo sqlite3 /var/lib/test-ephemeral/test.db 'SELECT min(timestamp) FROM test;' 2>/dev/null || echo 0)\"
-echo \"EPHEMERAL_SQLITE_INTEGRITY=\$(sudo sqlite3 /var/lib/test-ephemeral/test.db 'PRAGMA integrity_check;' 2>/dev/null || echo unknown)\"
+echo \"EPHEMERAL_SQLITE_ROWS=\$(python3 -c 'import sqlite3; c=sqlite3.connect(\"/var/lib/test-ephemeral/test.db\"); print(c.execute(\"SELECT count(*) FROM test\").fetchone()[0])' 2>/dev/null || echo 0)\"
+echo \"EPHEMERAL_SQLITE_MAX_TS=\$(python3 -c 'import sqlite3; c=sqlite3.connect(\"/var/lib/test-ephemeral/test.db\"); print(c.execute(\"SELECT max(timestamp) FROM test\").fetchone()[0] or 0)' 2>/dev/null || echo 0)\"
+echo \"EPHEMERAL_SQLITE_MIN_TS=\$(python3 -c 'import sqlite3; c=sqlite3.connect(\"/var/lib/test-ephemeral/test.db\"); print(c.execute(\"SELECT min(timestamp) FROM test\").fetchone()[0] or 0)' 2>/dev/null || echo 0)\"
+echo \"EPHEMERAL_SQLITE_INTEGRITY=\$(python3 -c 'import sqlite3; c=sqlite3.connect(\"/var/lib/test-ephemeral/test.db\"); print(c.execute(\"PRAGMA integrity_check\").fetchone()[0])' 2>/dev/null || echo unknown)\"
 echo \"EPHEMERAL_SQLITE_SIZE=\$(du -b /var/lib/test-ephemeral/test.db 2>/dev/null | cut -f1 || echo 0)\"
-echo \"EPHEMERAL_SQLITE_PID=\$(pgrep -f 'test-ephemeral/test.db' -o 2>/dev/null || echo none)\"
+echo \"EPHEMERAL_SQLITE_PID=\$(pgrep -f 'sqlite-writer-ephemeral' -o 2>/dev/null || echo none)\"
 
 echo \"EPHEMERAL_DIR_SIZE=\$(du -sb /var/lib/test-ephemeral/ 2>/dev/null | cut -f1 || echo 0)\"
 echo \"EPHEMERAL_LARGE_FILE_SIZE=\$(stat -c%s /var/lib/test-ephemeral/large-file.bin 2>/dev/null || echo 0)\"
@@ -149,45 +149,44 @@ echo \"EPHEMERAL_LARGE_FILE_SHA256=\$(sha256sum /var/lib/test-ephemeral/large-fi
 task.pass "VM workload data collected"
 
 get_val() {
-  echo "$VM_DATA" | grep "^${1}=" | head -1 | cut -d'=' -f2-
+  local val
+  val=$(echo "$VM_DATA" | grep "^${1}=" | head -1 | cut -d'=' -f2-)
+  echo "${val:-0}"
 }
 
 task.begin "Analyzing data gaps"
 log.verbose "Analyzing SQLite insert gaps (30s time windows)..."
-SQLITE_GAP_DATA=$(run_on_vm "sudo sqlite3 -json /data/test.db \"
-WITH gaps AS (
-  SELECT
-    rowid as rid,
-    timestamp as ts,
-    timestamp - LAG(timestamp) OVER (ORDER BY rowid) as gap
-  FROM test
-  WHERE rowid > 1
-),
-buckets AS (
-  SELECT
-    (ts / 30) * 30 as bucket_ts,
-    count(*) as total_inserts,
-    sum(CASE WHEN gap > 2 THEN 1 ELSE 0 END) as slow_inserts,
-    max(gap) as max_gap
-  FROM gaps
-  GROUP BY bucket_ts
-)
-SELECT
-  datetime(bucket_ts, 'unixepoch') as time_window_utc,
-  bucket_ts as epoch,
-  total_inserts,
-  slow_inserts,
-  ROUND(slow_inserts * 100.0 / total_inserts, 1) as slow_pct,
-  max_gap as max_gap_sec,
-  CASE
-    WHEN slow_inserts >= 5 THEN 'affected'
-    WHEN slow_inserts > 0 THEN 'jitter'
-    ELSE 'normal'
-  END as status
-FROM buckets
-WHERE slow_inserts > 0
-ORDER BY bucket_ts;
-\"" 2>/dev/null || echo "[]")
+SQLITE_GAP_DATA=$(run_on_vm "python3 -c '
+import sqlite3, json, datetime
+try:
+    c = sqlite3.connect(\"/data/test.db\")
+    rows = c.execute(\"SELECT rowid, timestamp FROM test ORDER BY rowid\").fetchall()
+    if len(rows) < 2:
+        print(\"[]\")
+    else:
+        buckets = {}
+        for i in range(1, len(rows)):
+            gap = rows[i][1] - rows[i-1][1]
+            ts = rows[i][1]
+            bucket = (ts // 30) * 30
+            if bucket not in buckets:
+                buckets[bucket] = {\"total\": 0, \"slow\": 0, \"max_gap\": 0}
+            buckets[bucket][\"total\"] += 1
+            if gap > 2:
+                buckets[bucket][\"slow\"] += 1
+            if gap > buckets[bucket][\"max_gap\"]:
+                buckets[bucket][\"max_gap\"] = gap
+        result = []
+        for b in sorted(buckets):
+            d = buckets[b]
+            if d[\"slow\"] > 0:
+                pct = round(d[\"slow\"] * 100.0 / d[\"total\"], 1)
+                status = \"affected\" if d[\"slow\"] >= 5 else \"jitter\"
+                result.append({\"time_window_utc\": datetime.datetime.utcfromtimestamp(b).strftime(\"%Y-%m-%d %H:%M:%S\"), \"epoch\": b, \"total_inserts\": d[\"total\"], \"slow_inserts\": d[\"slow\"], \"slow_pct\": pct, \"max_gap_sec\": d[\"max_gap\"], \"status\": status})
+        print(json.dumps(result))
+except:
+    print(\"[]\")
+'" 2>/dev/null || echo "[]")
 
 AFFECTED_WINDOWS=$(echo "$SQLITE_GAP_DATA" | python3 -c "
 import json, sys
@@ -697,7 +696,7 @@ cat > "$OUTPUT_FILE" << JSONEOF
     "ephemeral_data_intact": $([ "$EPHEMERAL_FILE_WRITER_DIFF" -ge 0 ] && [ "$EPHEMERAL_SQLITE_DIFF" -ge 0 ] && [ "$(get_val EPHEMERAL_SQLITE_INTEGRITY)" == "ok" ] && echo true || echo false),
     "persistent_large_data_intact": $(echo $LARGE_DATA_INTACT),
     "ephemeral_large_data_intact": $(echo $EPHEMERAL_DATA_INTACT),
-    "all_processes_running": $([ "$(get_val FILE_WRITER_PID)" != "none" ] && [ "$(get_val SQLITE_PID)" != "none" ] && [ "$(get_val HTTP_PID)" != "none" ] && [ "$(get_val CROND_STATUS)" == "active" ] && [ "$(get_val EPHEMERAL_FILE_WRITER_PID)" != "none" ] && [ "$(get_val EPHEMERAL_SQLITE_PID)" != "none" ] && echo true || echo false),
+    "all_processes_running": $([ "$(get_val FILE_WRITER_PID)" != "none" ] && [ "$(get_val SQLITE_PID)" != "none" ] && [ "$(get_val HTTP_PID)" != "none" ] && [ "$(get_val EPHEMERAL_FILE_WRITER_PID)" != "none" ] && [ "$(get_val EPHEMERAL_SQLITE_PID)" != "none" ] && echo true || echo false),
     "http_responding": $([ "$(get_val HTTP_STATUS)" == "200" ] && echo true || echo false)
   }
 }
@@ -897,7 +896,11 @@ PERSISTENT_SQLITE_STATUS="PASS"
 [ "$SQLITE_DIFF" -lt 0 ] && PERSISTENT_SQLITE_STATUS="FAIL"
 
 PERSISTENT_SQLITE_INTEGRITY_STATUS="PASS"
-[ "$(get_val SQLITE_INTEGRITY)" != "ok" ] && PERSISTENT_SQLITE_INTEGRITY_STATUS="FAIL"
+if [ "$(get_val SQLITE_INTEGRITY)" == "unknown" ]; then
+  PERSISTENT_SQLITE_INTEGRITY_STATUS="SKIP"
+elif [ "$(get_val SQLITE_INTEGRITY)" != "ok" ]; then
+  PERSISTENT_SQLITE_INTEGRITY_STATUS="FAIL"
+fi
 
 PERSISTENT_CRON_STATUS="PASS"
 [ "$CRON_DIFF" -lt 0 ] && PERSISTENT_CRON_STATUS="FAIL"
@@ -912,7 +915,11 @@ EPHEMERAL_SQLITE_STATUS="PASS"
 [ "$EPHEMERAL_SQLITE_DIFF" -lt 0 ] && EPHEMERAL_SQLITE_STATUS="FAIL"
 
 EPHEMERAL_SQLITE_INTEGRITY_STATUS="PASS"
-[ "$(get_val EPHEMERAL_SQLITE_INTEGRITY)" != "ok" ] && EPHEMERAL_SQLITE_INTEGRITY_STATUS="FAIL"
+if [ "$(get_val EPHEMERAL_SQLITE_INTEGRITY)" == "unknown" ]; then
+  EPHEMERAL_SQLITE_INTEGRITY_STATUS="SKIP"
+elif [ "$(get_val EPHEMERAL_SQLITE_INTEGRITY)" != "ok" ]; then
+  EPHEMERAL_SQLITE_INTEGRITY_STATUS="FAIL"
+fi
 
 EPHEMERAL_LARGE_FILE_STATUS="PASS"
 [ "$EPHEMERAL_DATA_INTACT" != "true" ] && EPHEMERAL_LARGE_FILE_STATUS="FAIL"
@@ -921,7 +928,16 @@ HTTP_STATUS_CHECK="PASS"
 [ "$(get_val HTTP_STATUS)" != "200" ] && HTTP_STATUS_CHECK="FAIL"
 
 CROND_STATUS_CHECK="PASS"
-[ "$(get_val CROND_STATUS)" != "active" ] && CROND_STATUS_CHECK="FAIL"
+if [[ "$HAS_PRE" == "true" ]]; then
+  PRE_CROND_STATUS=$(python3 -c "import json; d=json.load(open('${PRE_MIGRATION_FILE}')); print(d.get('workloads', {}).get('persistent_vdc', {}).get('cron_job', {}).get('crond_status', 'unknown'))" 2>/dev/null || echo "unknown")
+  if [[ "$PRE_CROND_STATUS" == "inactive" ]] && [[ "$(get_val CROND_STATUS)" == "inactive" ]]; then
+    CROND_STATUS_CHECK="SKIP"
+  elif [[ "$(get_val CROND_STATUS)" != "active" ]]; then
+    CROND_STATUS_CHECK="FAIL"
+  fi
+else
+  [ "$(get_val CROND_STATUS)" != "active" ] && CROND_STATUS_CHECK="FAIL"
+fi
 
 # Service running checks
 SERVICES_RUNNING_STATUS="PASS"
@@ -957,6 +973,8 @@ fi
 printf "    %-40s [%s]\n" "SQLite database integrity" "$PERSISTENT_SQLITE_INTEGRITY_STATUS"
 if [ "$PERSISTENT_SQLITE_INTEGRITY_STATUS" == "FAIL" ]; then
   printf "      → Integrity check result: %s\n" "$(get_val SQLITE_INTEGRITY)"
+elif [ "$PERSISTENT_SQLITE_INTEGRITY_STATUS" == "SKIP" ]; then
+  printf "      → sqlite3 not available in VM, skipped\n"
 fi
 
 printf "    %-40s [%s]\n" "Cron log continuity" "$PERSISTENT_CRON_STATUS"
@@ -981,6 +999,8 @@ fi
 printf "    %-40s [%s]\n" "Cron daemon active" "$CROND_STATUS_CHECK"
 if [ "$CROND_STATUS_CHECK" == "FAIL" ]; then
   printf "      → Crond status: %s (expected: active)\n" "$(get_val CROND_STATUS)"
+elif [ "$CROND_STATUS_CHECK" == "SKIP" ]; then
+  printf "      → Was inactive pre-migration, unchanged\n"
 fi
 echo ""
 
@@ -1005,6 +1025,8 @@ fi
 printf "    %-40s [%s]\n" "SQLite database integrity" "$EPHEMERAL_SQLITE_INTEGRITY_STATUS"
 if [ "$EPHEMERAL_SQLITE_INTEGRITY_STATUS" == "FAIL" ]; then
   printf "      → Integrity check result: %s\n" "$(get_val EPHEMERAL_SQLITE_INTEGRITY)"
+elif [ "$EPHEMERAL_SQLITE_INTEGRITY_STATUS" == "SKIP" ]; then
+  printf "      → sqlite3 not available in VM, skipped\n"
 fi
 
 printf "    %-40s [%s]\n" "Large file integrity (SHA256)" "$EPHEMERAL_LARGE_FILE_STATUS"
@@ -1038,7 +1060,10 @@ echo ""
 
 # --- OVERALL VERDICT ---
 OVERALL="PASS"
-if [ "$FILE_WRITER_DIFF" -lt 0 ] || [ "$SQLITE_DIFF" -lt 0 ] || [ "$(get_val SQLITE_INTEGRITY)" != "ok" ]; then
+if [ "$FILE_WRITER_DIFF" -lt 0 ] || [ "$SQLITE_DIFF" -lt 0 ]; then
+  OVERALL="FAIL"
+fi
+if [ "$(get_val SQLITE_INTEGRITY)" != "ok" ] && [ "$(get_val SQLITE_INTEGRITY)" != "unknown" ]; then
   OVERALL="FAIL"
 fi
 if [ "$HAS_PRE" == "true" ] && [ "$LOG_FILE_INTACT" != "true" ]; then

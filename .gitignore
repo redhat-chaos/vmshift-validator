@@ -69,6 +69,15 @@ kubeconfig*
 # Environment profiles (contain internal infra details)
 profiles/
 
+# Infrastructure docs (local copy from scale-lab, not committed)
+infra/
+
 # Misc
 tmp/
 temp/
+
+# Claude AI context (contains local-only infrastructure references)
+.claude/
+
+# Internal operational documentation (not for public repo)
+CCLM-LIVE-MIGRATION.md

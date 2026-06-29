@@ -191,6 +191,33 @@ reports/run-<timestamp>/
 └── ...
 ```
 
+## Infrastructure Reference (local, gitignored)
+
+The `infra/` directory contains local-only infrastructure documentation (gitignored) that provides awareness of the bare-metal lab environment this project runs against. Read these files when working on cluster connectivity, provisioning, networking, or migration profiles.
+
+```
+infra/
+└── cloud29/
+    ├── scalelab-reference.md              # Scale Lab access, credentials, networking, tools
+    ├── reprovisioning-guide.md            # Node wipe/re-provisioning process & lessons learned
+    └── clusters/
+        ├── status-report.md               # Current cluster status
+        ├── cclm-architecture.md           # Cross-cluster live migration architecture
+        ├── cclm-networking-deep-dive.md   # L2 networking for CCLM
+        ├── cclm-networking-knowledgebase.md
+        ├── cclm-setup-guide.md            # CCLM setup steps
+        ├── cclm-implementation-log.md     # Implementation log & decisions
+        ├── nfs-setup-guide.md             # NFS shared storage setup
+        ├── blue/                           # Blue cluster (source) details
+        │   ├── deployment-guide.md
+        │   ├── summary.md
+        │   └── inventory.md
+        └── green/                          # Green cluster (target) details
+            ├── deployment-guide.md
+            ├── summary.md
+            └── inventory.md
+```
+
 ## Gotchas
 
 - `density-setup.sh` and `discover-vms.sh` always use the `gcp` profile (direct kubeconfig) even when `MIGRATION_PROFILE=baremetal-l2` — this is intentional since density runs from the local machine.

@@ -53,11 +53,18 @@ stringData:
         content: |
           #!/bin/bash
           DB=/data/test.db
-          sqlite3 "$DB" "CREATE TABLE IF NOT EXISTS test (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp INTEGER NOT NULL, written_at TEXT NOT NULL);"
-          while true; do
-            sqlite3 "$DB" "INSERT INTO test (timestamp, written_at) VALUES ($(date +%s), '$(date +%Y-%m-%dT%H:%M:%S)');"
-            sleep 2
-          done
+          python3 -c "
+          import sqlite3, time, datetime
+          conn = sqlite3.connect('$DB')
+          conn.execute('CREATE TABLE IF NOT EXISTS test (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp INTEGER NOT NULL, written_at TEXT NOT NULL)')
+          conn.commit()
+          while True:
+              now = int(time.time())
+              ts = datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S')
+              conn.execute('INSERT INTO test (timestamp, written_at) VALUES (?, ?)', (now, ts))
+              conn.commit()
+              time.sleep(2)
+          "
       - path: /etc/systemd/system/sqlite-writer.service
         content: |
           [Unit]
@@ -91,11 +98,18 @@ stringData:
           #!/bin/bash
           DB=/var/lib/test-ephemeral/test.db
           mkdir -p /var/lib/test-ephemeral
-          sqlite3 "$DB" "CREATE TABLE IF NOT EXISTS test (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp INTEGER NOT NULL, written_at TEXT NOT NULL);"
-          while true; do
-            sqlite3 "$DB" "INSERT INTO test (timestamp, written_at) VALUES ($(date +%s), '$(date +%Y-%m-%dT%H:%M:%S)');"
-            sleep 2
-          done
+          python3 -c "
+          import sqlite3, time, datetime
+          conn = sqlite3.connect('$DB')
+          conn.execute('CREATE TABLE IF NOT EXISTS test (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp INTEGER NOT NULL, written_at TEXT NOT NULL)')
+          conn.commit()
+          while True:
+              now = int(time.time())
+              ts = datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S')
+              conn.execute('INSERT INTO test (timestamp, written_at) VALUES (?, ?)', (now, ts))
+              conn.commit()
+              time.sleep(2)
+          "
       - path: /etc/systemd/system/sqlite-writer-ephemeral.service
         content: |
           [Unit]

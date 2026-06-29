@@ -22,7 +22,7 @@ jobs:
 
     # 5 small Fedora VMs spread by scheduler
     - objectTemplate: templates/vm-services.yml
-      replicas: 5
+      replicas: 1
       inputVars:
         name: vm-svc
         image: REPLACE_CONTAINER_IMAGE

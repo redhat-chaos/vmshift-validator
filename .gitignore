@@ -80,5 +80,16 @@ temp/
 # Claude AI context (contains local-only infrastructure references)
 .claude/
 
+# AI/IDE agent configs
+.agents/
+.cursor/
+skills-lock.json
+
+# Chaos test framework (contains bastion-specific paths)
+cclm-chaos/
+
+# Test specs (internal)
+tests/
+
 # Internal operational documentation (not for public repo)
 CCLM-LIVE-MIGRATION.md

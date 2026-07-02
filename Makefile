@@ -190,6 +190,7 @@ MIGRATION_ARGS := \
 	density-setup density-status density-teardown \
 	discover-vms migrate-selective migrate-dry-run \
 	report list-reports logs \
+	reauth-blue \
 	ssh status \
 	clean-migrations clean-generated clean-reports clean-logs clean-all \
 	e2e
@@ -214,6 +215,8 @@ help: ## Show help
 	@echo ""
 	@echo "Phase 1 - Density:"
 	@echo "  make density-setup              Create VMs via kube-burner"
+	@echo "  make density-setup KUBE_BURNER_CONFIG=vm-services-heavy.yml"
+	@echo "                                  Create VMs with memory-heavy workloads"
 	@echo "  make density-status             Show VM status on source"
 	@echo "  make density-teardown           Remove VMs from both clusters"
 	@echo ""
@@ -228,6 +231,9 @@ help: ## Show help
 	@echo "  make report                     Show latest summary"
 	@echo "  make list-reports               List report runs"
 	@echo "  make logs                       Show latest kube-burner log"
+	@echo ""
+	@echo "Auth:"
+	@echo "  make reauth-blue                Reauthenticate blue cluster (baremetal-l2)"
 	@echo ""
 	@echo "Cleanup:"
 	@echo "  make clean-migrations           Delete Forklift CRs"
@@ -475,6 +481,26 @@ endif
 		KUBECONFIG=$(SOURCE_KUBECONFIG) virtctl ssh $(SSH_USER)@vm/$(VM) \
 			--namespace $(NAMESPACE) --identity-file=$(SSH_KEY); \
 	fi
+
+reauth-blue: ## Reauthenticate blue (source) cluster via oc login (baremetal-l2)
+	@PROFILE_ENV="$(PROJECT_DIR)/profiles/baremetal-l2.env"; \
+	if [[ ! -f "$$PROFILE_ENV" ]]; then \
+		echo "ERROR: $$PROFILE_ENV not found."; \
+		echo "  cp profiles/baremetal-l2.env.example profiles/baremetal-l2.env"; \
+		exit 1; \
+	fi; \
+	source "$$PROFILE_ENV"; \
+	if [[ -z "$$BLUE_API_URL" || -z "$$BLUE_USERNAME" || -z "$$BLUE_PASSWORD" ]]; then \
+		echo "ERROR: BLUE_API_URL, BLUE_USERNAME, BLUE_PASSWORD must be set in $$PROFILE_ENV"; \
+		exit 1; \
+	fi; \
+	echo "Logging in to blue cluster: $$BLUE_API_URL"; \
+	oc login "$$BLUE_API_URL" \
+		--username "$$BLUE_USERNAME" \
+		--password "$$BLUE_PASSWORD" \
+		--insecure-skip-tls-verify \
+		--kubeconfig "$$SOURCE_BASTION_KUBECONFIG"; \
+	echo "Blue cluster reauthenticated. Kubeconfig: $$SOURCE_BASTION_KUBECONFIG"
 
 status: ## Show VM on both clusters (VM=name)
 ifndef VM

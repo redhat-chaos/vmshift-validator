@@ -32,7 +32,7 @@ echo \"CAPTURE_TIME_LOCAL=\$(date '+%Y-%m-%d %H:%M:%S %Z')\"
 
 echo \"FILE_WRITER_LINES=\$(wc -l < /data/test/log.txt 2>/dev/null || echo 0)\"
 echo \"FILE_WRITER_SIZE=\$(du -b /data/test/log.txt 2>/dev/null | cut -f1 || echo 0)\"
-echo \"FILE_WRITER_LAST=\$(tail -1 /data/test/log.txt 2>/dev/null || echo none)\"
+echo \"FILE_WRITER_LAST=\$(tail -1 /data/test/log.txt 2>/dev/null | head -c 256 || echo none)\"
 echo \"FILE_WRITER_PID=\$(systemctl show -p MainPID file-writer.service 2>/dev/null | cut -d= -f2 || echo none)\"
 
 python3 -c '
@@ -89,7 +89,7 @@ echo \"LARGE_FILE_SHA256=\$(sha256sum /data/large-file.bin 2>/dev/null | cut -d'
 
 echo \"EPHEMERAL_FILE_WRITER_LINES=\$(wc -l < /var/lib/test-ephemeral/log.txt 2>/dev/null || echo 0)\"
 echo \"EPHEMERAL_FILE_WRITER_SIZE=\$(du -b /var/lib/test-ephemeral/log.txt 2>/dev/null | cut -f1 || echo 0)\"
-echo \"EPHEMERAL_FILE_WRITER_LAST=\$(tail -1 /var/lib/test-ephemeral/log.txt 2>/dev/null || echo none)\"
+echo \"EPHEMERAL_FILE_WRITER_LAST=\$(tail -1 /var/lib/test-ephemeral/log.txt 2>/dev/null | head -c 256 || echo none)\"
 echo \"EPHEMERAL_FILE_WRITER_PID=\$(pgrep -f 'test-ephemeral/log.txt' -o 2>/dev/null || echo none)\"
 
 python3 -c '

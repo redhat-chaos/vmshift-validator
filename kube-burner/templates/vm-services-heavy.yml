@@ -1,0 +1,307 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{.name}}-{{ printf "%.8s" .UUID }}-{{.Replica}}-userdata
+  labels:
+    app: {{.name}}-{{ printf "%.8s" .UUID }}-{{.Replica}}
+    workload-type: services-test
+type: Opaque
+stringData:
+  userdata: |
+    #cloud-config
+    user: {{.user}}
+    password: {{.password}}
+    chpasswd:
+      expire: false
+    ssh_authorized_keys:
+      - {{.sshPublicKey}}
+    packages:
+      - sqlite
+      - python3
+      - cronie
+    mounts:
+      - [/dev/vdc, /data, auto, "defaults,nofail", "0", "2"]
+    write_files:
+      - path: /usr/local/bin/file-writer.py
+        permissions: '0755'
+        content: |
+          #!/usr/bin/env python3
+          import time, datetime, os, mmap
+
+          LOG_PATH = "/data/test/log.txt"
+          RING_SIZE = 1000
+          LINE_SIZE = 65536
+
+          os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
+
+          padding = "X" * (LINE_SIZE - 60)
+          ring = [bytearray(LINE_SIZE) for _ in range(RING_SIZE)]
+
+          idx = 0
+          with open(LOG_PATH, "a", buffering=LINE_SIZE) as f:
+              while True:
+                  ts = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")
+                  line = f"{ts} - writing test data {padding}\n"
+                  f.write(line)
+                  f.flush()
+                  ring[idx % RING_SIZE][:] = bytearray(line.encode()[:LINE_SIZE])
+                  idx += 1
+                  time.sleep(1)
+      - path: /etc/systemd/system/file-writer.service
+        content: |
+          [Unit]
+          Description=Persistent file writer (heavy)
+          After=local-fs.target
+          [Service]
+          Type=simple
+          ExecStart=/usr/bin/python3 /usr/local/bin/file-writer.py
+          Restart=always
+          RestartSec=3
+          [Install]
+          WantedBy=multi-user.target
+      - path: /usr/local/bin/file-writer-ephemeral.py
+        permissions: '0755'
+        content: |
+          #!/usr/bin/env python3
+          import time, datetime, os
+
+          LOG_PATH = "/var/lib/test-ephemeral/log.txt"
+          RING_SIZE = 500
+          LINE_SIZE = 65536
+
+          os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
+
+          padding = "X" * (LINE_SIZE - 70)
+          ring = [bytearray(LINE_SIZE) for _ in range(RING_SIZE)]
+
+          idx = 0
+          with open(LOG_PATH, "a", buffering=LINE_SIZE) as f:
+              while True:
+                  ts = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")
+                  line = f"{ts} - writing ephemeral data {padding}\n"
+                  f.write(line)
+                  f.flush()
+                  ring[idx % RING_SIZE][:] = bytearray(line.encode()[:LINE_SIZE])
+                  idx += 1
+                  time.sleep(1)
+      - path: /etc/systemd/system/file-writer-ephemeral.service
+        content: |
+          [Unit]
+          Description=Ephemeral file writer (heavy)
+          After=local-fs.target
+          [Service]
+          Type=simple
+          ExecStart=/usr/bin/python3 /usr/local/bin/file-writer-ephemeral.py
+          Restart=always
+          RestartSec=3
+          [Install]
+          WantedBy=multi-user.target
+      - path: /usr/local/bin/http-server.py
+        permissions: '0755'
+        content: |
+          #!/usr/bin/env python3
+          import http.server, threading, time, os
+
+          DATASET_SIZE = 2048
+          ENTRY_SIZE = 65536
+          SERVE_DIR = "/data"
+
+          dataset = [bytearray(os.urandom(ENTRY_SIZE)) for _ in range(DATASET_SIZE)]
+
+          def dirty_loop():
+              idx = 0
+              while True:
+                  dataset[idx % DATASET_SIZE][:64] = os.urandom(64)
+                  idx += 1
+                  if idx % 100 == 0:
+                      time.sleep(0.01)
+
+          t = threading.Thread(target=dirty_loop, daemon=True)
+          t.start()
+
+          os.chdir(SERVE_DIR)
+          server = http.server.HTTPServer(("", 8080), http.server.SimpleHTTPRequestHandler)
+          server.serve_forever()
+      - path: /etc/systemd/system/http-server.service
+        content: |
+          [Unit]
+          Description=HTTP server on port 8080 (heavy)
+          After=network-online.target local-fs.target
+          Wants=network-online.target
+          [Service]
+          Type=simple
+          WorkingDirectory=/data
+          ExecStart=/usr/bin/python3 /usr/local/bin/http-server.py
+          Restart=always
+          RestartSec=3
+          [Install]
+          WantedBy=multi-user.target
+      - path: /usr/local/bin/sqlite-writer.sh
+        permissions: '0755'
+        content: |
+          #!/bin/bash
+          DB=/data/test.db
+          python3 -c "
+          import sqlite3, time, datetime, os
+
+          conn = sqlite3.connect('$DB')
+          conn.execute('PRAGMA journal_mode=WAL')
+          conn.execute('PRAGMA cache_size=-131072')
+          conn.execute('PRAGMA wal_autocheckpoint=10000')
+          conn.execute('CREATE TABLE IF NOT EXISTS test (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp INTEGER NOT NULL, written_at TEXT NOT NULL, data BLOB)')
+          conn.commit()
+
+          blob = os.urandom(32768)
+          counter = 0
+          while True:
+              now = int(time.time())
+              ts = datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S')
+              conn.execute('INSERT INTO test (timestamp, written_at, data) VALUES (?, ?, ?)', (now, ts, blob))
+              conn.commit()
+              counter += 1
+              if counter % 10 == 0:
+                  conn.execute('SELECT id, timestamp, written_at FROM test ORDER BY id DESC LIMIT 1000').fetchall()
+              time.sleep(2)
+          "
+      - path: /etc/systemd/system/sqlite-writer.service
+        content: |
+          [Unit]
+          Description=SQLite writer to /data/test.db (heavy)
+          After=local-fs.target
+          [Service]
+          Type=simple
+          ExecStart=/usr/local/bin/sqlite-writer.sh
+          Restart=always
+          RestartSec=3
+          [Install]
+          WantedBy=multi-user.target
+      - path: /etc/cron.d/test-cron
+        content: |
+          * * * * * root mkdir -p /data/test && echo "cron ran at $(date +\%Y-\%m-\%dT\%H:\%M:\%S)" >> /data/test/cron.log
+      - path: /usr/local/bin/sqlite-writer-ephemeral.sh
+        permissions: '0755'
+        content: |
+          #!/bin/bash
+          DB=/var/lib/test-ephemeral/test.db
+          mkdir -p /var/lib/test-ephemeral
+          python3 -c "
+          import sqlite3, time, datetime, os
+
+          conn = sqlite3.connect('$DB')
+          conn.execute('PRAGMA journal_mode=WAL')
+          conn.execute('PRAGMA cache_size=-49152')
+          conn.execute('PRAGMA wal_autocheckpoint=10000')
+          conn.execute('CREATE TABLE IF NOT EXISTS test (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp INTEGER NOT NULL, written_at TEXT NOT NULL, data BLOB)')
+          conn.commit()
+
+          blob = os.urandom(32768)
+          counter = 0
+          while True:
+              now = int(time.time())
+              ts = datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S')
+              conn.execute('INSERT INTO test (timestamp, written_at, data) VALUES (?, ?, ?)', (now, ts, blob))
+              conn.commit()
+              counter += 1
+              if counter % 10 == 0:
+                  conn.execute('SELECT id, timestamp, written_at FROM test ORDER BY id DESC LIMIT 1000').fetchall()
+              time.sleep(2)
+          "
+      - path: /etc/systemd/system/sqlite-writer-ephemeral.service
+        content: |
+          [Unit]
+          Description=Ephemeral SQLite writer (heavy)
+          [Service]
+          Type=simple
+          ExecStart=/usr/local/bin/sqlite-writer-ephemeral.sh
+          Restart=always
+          RestartSec=3
+          [Install]
+          WantedBy=multi-user.target
+    runcmd:
+      - mkdir -p /data
+      - |
+        if ! blkid /dev/vdc | grep -q TYPE; then
+          mkfs.xfs -L data /dev/vdc
+        fi
+      - mount -a
+      - mkdir -p /data/test
+      - mkdir -p /var/lib/test-ephemeral
+      - systemctl daemon-reload
+      - systemctl enable --now file-writer.service
+      - systemctl enable --now http-server.service
+      - systemctl enable --now sqlite-writer.service
+      - systemctl enable --now crond
+      - systemctl enable --now file-writer-ephemeral.service
+      - systemctl enable --now sqlite-writer-ephemeral.service
+---
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: {{.name}}-{{ printf "%.8s" .UUID }}-{{.Replica}}
+  labels:
+    app: {{.name}}-{{ printf "%.8s" .UUID }}-{{.Replica}}
+    migration.forklift.konveyor.io/eligible: "true"
+    vm-os: {{.osLabel}}
+    vm-size: {{.sizeLabel}}
+    workload-type: services-test
+spec:
+  runStrategy: Always
+  dataVolumeTemplates:
+    - metadata:
+        name: {{.name}}-{{ printf "%.8s" .UUID }}-{{.Replica}}-data-volume
+      spec:
+        pvc:
+          accessModes:
+            - ReadWriteMany
+          resources:
+            requests:
+              storage: {{.storageSize}}
+          storageClassName: {{.storageClassName}}
+        source:
+          blank: {}
+  template:
+    metadata:
+      labels:
+        kubevirt.io/vm: {{.name}}-{{ printf "%.8s" .UUID }}-{{.Replica}}
+        app: {{.name}}-{{ printf "%.8s" .UUID }}-{{.Replica}}
+        vm-name: {{.name}}-{{ printf "%.8s" .UUID }}-{{.Replica}}
+        workload-type: services-test
+    spec:
+      domain:
+        cpu:
+          cores: {{.cpuCores}}
+        devices:
+          disks:
+            - disk:
+                bus: virtio
+              name: containerdisk
+            - disk:
+                bus: virtio
+              name: cloudinitdisk
+            - disk:
+                bus: virtio
+              name: datadisk
+          interfaces:
+            - name: default
+              masquerade: {}
+        resources:
+          requests:
+            memory: {{.memory}}
+      {{- if .targetNode }}
+      nodeSelector:
+        kubernetes.io/hostname: {{.targetNode}}
+      {{- end }}
+      networks:
+        - name: default
+          pod: {}
+      volumes:
+        - name: containerdisk
+          containerDisk:
+            image: {{.image}}
+        - name: cloudinitdisk
+          cloudInitNoCloud:
+            secretRef:
+              name: {{.name}}-{{ printf "%.8s" .UUID }}-{{.Replica}}-userdata
+        - name: datadisk
+          dataVolume:
+            name: {{.name}}-{{ printf "%.8s" .UUID }}-{{.Replica}}-data-volume

@@ -18,6 +18,7 @@ PHASE=""
 CLUSTER_ROLE="source"
 MIGRATION_START_EPOCH=""
 MIGRATION_END_EPOCH=""
+QUERY_TIME=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -30,6 +31,7 @@ while [[ $# -gt 0 ]]; do
     --migration-end-epoch) MIGRATION_END_EPOCH="$2"; shift 2 ;;
     --source-kubeconfig)   SOURCE_KUBECONFIG="$2"; shift 2 ;;
     --target-kubeconfig)   TARGET_KUBECONFIG="$2"; shift 2 ;;
+    --query-time)          QUERY_TIME="$2"; shift 2 ;;
     *)                     shift ;;
   esac
 done
@@ -47,10 +49,15 @@ case "$PHASE" in
   pre)
     log.debug_err "Capturing Prometheus pre-migration metrics for ${VM_NAME}"
 
-    prom_capture_vm_metrics "$CLUSTER_ROLE" "$VM_NAME" "$NAMESPACE" > "${_prom_tmpdir}/vm.json"
-    prom_capture_operator_health "$CLUSTER_ROLE" > "${_prom_tmpdir}/op.json"
-    capture_epoch=$(date +%s)
-    timestamp_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    prom_capture_vm_metrics "$CLUSTER_ROLE" "$VM_NAME" "$NAMESPACE" "$QUERY_TIME" > "${_prom_tmpdir}/vm.json"
+    prom_capture_operator_health "$CLUSTER_ROLE" "$QUERY_TIME" > "${_prom_tmpdir}/op.json"
+    if [[ -n "$QUERY_TIME" ]]; then
+      capture_epoch="$QUERY_TIME"
+      timestamp_utc=$(date -u -d "@${QUERY_TIME}" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -r "${QUERY_TIME}" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "unknown")
+    else
+      capture_epoch=$(date +%s)
+      timestamp_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    fi
 
     python3 -c "
 import json, sys
@@ -102,15 +109,15 @@ json.dump(snap, sys.stdout, indent=2)
   post)
     log.debug_err "Capturing Prometheus post-migration metrics for ${VM_NAME}"
 
-    prom_capture_vm_metrics "$CLUSTER_ROLE" "$VM_NAME" "$NAMESPACE" > "${_prom_tmpdir}/vm.json"
-    prom_capture_operator_health "$CLUSTER_ROLE" > "${_prom_tmpdir}/op.json"
-    prom_capture_mtv_metrics "$CLUSTER_ROLE" > "${_prom_tmpdir}/mtv.json"
+    prom_capture_vm_metrics "$CLUSTER_ROLE" "$VM_NAME" "$NAMESPACE" "$QUERY_TIME" > "${_prom_tmpdir}/vm.json"
+    prom_capture_operator_health "$CLUSTER_ROLE" "$QUERY_TIME" > "${_prom_tmpdir}/op.json"
+    prom_capture_mtv_metrics "$CLUSTER_ROLE" "$QUERY_TIME" > "${_prom_tmpdir}/mtv.json"
 
     echo '{}' > "${_prom_tmpdir}/mfin.json"
     if [[ "$CLUSTER_ROLE" == "target" ]]; then
       local_f="name=\"${VM_NAME}\",namespace=\"${NAMESPACE}\""
-      prom_query source "kubevirt_vmi_migration_succeeded{${local_f}}" > "${_prom_tmpdir}/mig_succ.json" 2>/dev/null || echo "$_PROM_ERROR_INSTANT" > "${_prom_tmpdir}/mig_succ.json"
-      prom_query source "kubevirt_vmi_migration_failed{${local_f}}" > "${_prom_tmpdir}/mig_fail.json" 2>/dev/null || echo "$_PROM_ERROR_INSTANT" > "${_prom_tmpdir}/mig_fail.json"
+      prom_query source "kubevirt_vmi_migration_succeeded{${local_f}}" "$QUERY_TIME" > "${_prom_tmpdir}/mig_succ.json" 2>/dev/null || echo "$_PROM_ERROR_INSTANT" > "${_prom_tmpdir}/mig_succ.json"
+      prom_query source "kubevirt_vmi_migration_failed{${local_f}}" "$QUERY_TIME" > "${_prom_tmpdir}/mig_fail.json" 2>/dev/null || echo "$_PROM_ERROR_INSTANT" > "${_prom_tmpdir}/mig_fail.json"
       python3 -c "
 import json
 def val(path):
@@ -124,8 +131,13 @@ json.dump({'migration_succeeded': val('${_prom_tmpdir}/mig_succ.json'), 'migrati
 " 2>/dev/null || true
     fi
 
-    capture_epoch=$(date +%s)
-    timestamp_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    if [[ -n "$QUERY_TIME" ]]; then
+      capture_epoch="$QUERY_TIME"
+      timestamp_utc=$(date -u -d "@${QUERY_TIME}" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -r "${QUERY_TIME}" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "unknown")
+    else
+      capture_epoch=$(date +%s)
+      timestamp_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    fi
 
     python3 -c "
 import json, sys

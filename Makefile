@@ -541,6 +541,13 @@ list-reports: ## List all report runs
 pull-reports: ## Pull reports from remote bastion to local machine
 	@./pull-reports.sh
 
+backfill-prometheus: ## Backfill Prometheus v2 metrics for historical runs
+	@$(SCRIPTS_DIR)/backfill-prometheus.sh $(if $(PATTERN),--report-pattern "$(PATTERN)") \
+		--migration-profile $(MIGRATION_PROFILE) \
+		$(if $(SOURCE_KUBECONFIG),--source-kubeconfig $(SOURCE_KUBECONFIG)) \
+		$(if $(TARGET_KUBECONFIG),--target-kubeconfig $(TARGET_KUBECONFIG)) \
+		$(if $(DRY_RUN),--dry-run)
+
 logs: ## Show latest kube-burner log
 	@LATEST=$$(ls -t $(KUBE_BURNER_DIR)/kube-burner-*.log 2>/dev/null | head -1); \
 	if [[ -n "$$LATEST" ]]; then cat "$$LATEST"; else echo "No kube-burner logs found."; fi

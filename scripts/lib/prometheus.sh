@@ -41,15 +41,18 @@ prom_check_connectivity() {
   echo "$result" | jq -e '.status == "success"' >/dev/null 2>&1
 }
 
-# prom_query CLUSTER_ROLE QUERY
-# Execute a single instant PromQL query. Returns raw JSON on stdout.
+# prom_query CLUSTER_ROLE QUERY [TIMESTAMP]
+# Execute a single instant PromQL query. Optional TIMESTAMP for historical queries.
 prom_query() {
   local role="$1"
   local query="$2"
+  local timestamp="${3:-}"
   local encoded
   encoded=$(_prom_urlencode "$query")
 
-  local exec_cmd="wget -qO- '${PROM_URL}/api/v1/query?query=${encoded}' 2>/dev/null"
+  local time_param=""
+  [[ -n "$timestamp" ]] && time_param="&time=${timestamp}"
+  local exec_cmd="wget -qO- '${PROM_URL}/api/v1/query?query=${encoded}${time_param}' 2>/dev/null"
   local exec_args=(exec "$PROM_POD" -n "$PROM_NAMESPACE" -c "$PROM_CONTAINER" -- sh -c "$exec_cmd")
 
   if [[ "$role" == "target" ]]; then
@@ -91,16 +94,20 @@ _prom_batch_query() {
   fi
 }
 
-# _prom_build_batch_script QUERIES_JSON
+# _prom_build_batch_script QUERIES_JSON [TIMESTAMP]
 # Takes a JSON object {"key": "PromQL", ...} and produces a shell script
-# that runs all queries and outputs combined JSON.
+# that runs all queries and outputs combined JSON. Optional TIMESTAMP for historical queries.
 _prom_build_batch_script() {
   local queries_json="$1"
+  local timestamp="${2:-}"
   _PROM_BUILD_URL="$PROM_URL" _PROM_BUILD_ERR='{"status":"error","data":{"resultType":"vector","result":[]}}' \
+  _PROM_BUILD_TIME="$timestamp" \
   python3 -c '
 import json, sys, os, urllib.parse
 prom_url = os.environ["_PROM_BUILD_URL"]
 error_json = os.environ["_PROM_BUILD_ERR"]
+query_time = os.environ.get("_PROM_BUILD_TIME", "")
+time_param = "&time=" + query_time if query_time else ""
 queries = json.loads(sys.stdin.read())
 lines = ["echo \"{\""]
 first = True
@@ -109,18 +116,18 @@ for key, query in queries.items():
     comma = "" if first else ","
     first = False
     lines.append("echo \"" + comma + "\\\"" + key + "\\\":\"")
-    lines.append("wget -qO- '\''" + prom_url + "/api/v1/query?query=" + encoded + "'\'' 2>/dev/null || echo '\'' " + error_json + " '\''")
+    lines.append("wget -qO- '\''" + prom_url + "/api/v1/query?query=" + encoded + time_param + "'\'' 2>/dev/null || echo '\'' " + error_json + " '\''")
 lines.append("echo \"}\"")
 print("; ".join(lines))
 ' <<< "$queries_json"
 }
 
-# _prom_batch_and_extract CLUSTER_ROLE QUERIES_JSON
+# _prom_batch_and_extract CLUSTER_ROLE QUERIES_JSON [TIMESTAMP]
 # Run a batch query and extract values. Outputs raw JSON keyed by metric name.
 _prom_batch_and_extract() {
-  local role="$1" queries="$2"
+  local role="$1" queries="$2" timestamp="${3:-}"
   local script raw
-  script=$(_prom_build_batch_script "$queries")
+  script=$(_prom_build_batch_script "$queries" "$timestamp")
   raw=$(_prom_batch_query "$role" "$script")
   echo "$raw" | python3 -c "
 import json, sys, re
@@ -143,10 +150,10 @@ json.dump({k: extract(v) for k, v in data.items()}, sys.stdout, indent=2)
 " 2>/dev/null || echo '{}'
 }
 
-# prom_capture_vm_metrics CLUSTER_ROLE VM_NAME NAMESPACE
+# prom_capture_vm_metrics CLUSTER_ROLE VM_NAME NAMESPACE [TIMESTAMP]
 # Query all per-VM resource metrics in category-sized batches. Outputs JSON on stdout.
 prom_capture_vm_metrics() {
-  local role="$1" vm="$2" ns="$3"
+  local role="$1" vm="$2" ns="$3" timestamp="${4:-}"
   local f="name=\\\"${vm}\\\",namespace=\\\"${ns}\\\""
 
   local cpu_q mem_q net_q stor_q guest_q
@@ -221,11 +228,11 @@ QUERYEOF
 )
 
   local cpu mem net stor guest
-  cpu=$(_prom_batch_and_extract "$role" "$cpu_q")
-  mem=$(_prom_batch_and_extract "$role" "$mem_q")
-  net=$(_prom_batch_and_extract "$role" "$net_q")
-  stor=$(_prom_batch_and_extract "$role" "$stor_q")
-  guest=$(_prom_batch_and_extract "$role" "$guest_q")
+  cpu=$(_prom_batch_and_extract "$role" "$cpu_q" "$timestamp")
+  mem=$(_prom_batch_and_extract "$role" "$mem_q" "$timestamp")
+  net=$(_prom_batch_and_extract "$role" "$net_q" "$timestamp")
+  stor=$(_prom_batch_and_extract "$role" "$stor_q" "$timestamp")
+  guest=$(_prom_batch_and_extract "$role" "$guest_q" "$timestamp")
 
   jq -n \
     --argjson cpu "$cpu" \
@@ -299,10 +306,10 @@ json.dump(out, sys.stdout, indent=2)
 " 2>/dev/null || echo '{}'
 }
 
-# prom_capture_mtv_metrics CLUSTER_ROLE
+# prom_capture_mtv_metrics CLUSTER_ROLE [TIMESTAMP]
 # Forklift/MTV controller metrics (cluster-wide, no VM filter).
 prom_capture_mtv_metrics() {
-  local role="$1"
+  local role="$1" timestamp="${2:-}"
 
   local queries
   queries=$(cat <<'QUERYEOF'
@@ -323,7 +330,7 @@ QUERYEOF
 )
 
   local script
-  script=$(_prom_build_batch_script "$queries")
+  script=$(_prom_build_batch_script "$queries" "$timestamp")
   local raw
   raw=$(_prom_batch_query "$role" "$script")
 
@@ -347,10 +354,10 @@ json.dump(out, sys.stdout, indent=2)
 " 2>/dev/null || echo '{}'
 }
 
-# prom_capture_operator_health CLUSTER_ROLE
+# prom_capture_operator_health CLUSTER_ROLE [TIMESTAMP]
 # Operator up/ready metrics.
 prom_capture_operator_health() {
-  local role="$1"
+  local role="$1" timestamp="${2:-}"
 
   local queries
   queries=$(cat <<'QUERYEOF'
@@ -368,7 +375,7 @@ QUERYEOF
 )
 
   local script
-  script=$(_prom_build_batch_script "$queries")
+  script=$(_prom_build_batch_script "$queries" "$timestamp")
   local raw
   raw=$(_prom_batch_query "$role" "$script")
 

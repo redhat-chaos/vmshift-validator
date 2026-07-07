@@ -11,6 +11,9 @@ PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 source "${SCRIPT_DIR}/lib/log.sh"
 source "${SCRIPT_DIR}/lib/executor.sh"
 source "${SCRIPT_DIR}/lib/ssh.sh"
+source "${SCRIPT_DIR}/lib/vm-os.sh"
+source "${SCRIPT_DIR}/lib/guest-agent.sh"
+source "${SCRIPT_DIR}/lib/vm-data-collector-windows.sh"
 
 KUBECONFIG_PATH=""
 KUBE_BURNER_CONFIG=""
@@ -119,20 +122,51 @@ stabilize_vm() {
   VM_NAME="$vm"
   VM_CLUSTER="source"
 
-  if ! wait_for_guest_ssh; then
-    echo "FAIL SSH timeout" > "$result_file"
-    return
+  local vm_os
+  vm_os=$(detect_vm_os "$vm" "$NAMESPACE" "source")
+
+  if is_windows_vm "$vm_os"; then
+    if ! wait_for_guest_agent; then
+      echo "FAIL guest-agent timeout" > "$result_file"
+      return
+    fi
+  else
+    if ! wait_for_guest_ssh; then
+      echo "FAIL SSH timeout" > "$result_file"
+      return
+    fi
   fi
 
   local stab_ok=false
   local stab_start stab_out stab_lines stab_rows
+  local poll_interval=5
+  if is_windows_vm "$vm_os"; then
+    poll_interval=10
+  fi
+
   stab_start=$(date +%s)
   while (( $(date +%s) - stab_start < WORKLOAD_TIMEOUT )); do
-    stab_out=$(run_on_vm "
+    if is_windows_vm "$vm_os"; then
+      stab_out=$(run_on_vm_via_agent '
+$ErrorActionPreference = "SilentlyContinue"
+$lines = 0
+if (Test-Path "C:\data\test\log.txt") {
+  $content = Get-Content "C:\data\test\log.txt"
+  $lines = if ($content) { @($content).Count } else { 0 }
+}
+$rows = 0
+try {
+  $rows = & "C:\Program Files\Python312\python.exe" -c "import sqlite3; c=sqlite3.connect(r\"C:\data\test\test.db\"); print(c.execute(\"SELECT count(*) FROM test\").fetchone()[0])" 2>$null
+} catch { $rows = 0 }
+Write-Output "$lines $rows"
+' 2>/dev/null || echo "0 0")
+    else
+      stab_out=$(run_on_vm "
       LINES=\$(wc -l < /data/test/log.txt 2>/dev/null || echo 0)
       ROWS=\$(python3 -c 'import sqlite3; c=sqlite3.connect(\"/data/test.db\"); print(c.execute(\"SELECT count(*) FROM test\").fetchone()[0])' 2>/dev/null || echo 0)
       echo \"\$LINES \$ROWS\"
     " 2>/dev/null || echo "0 0")
+    fi
     stab_lines=$(echo "$stab_out" | awk '{print $1}')
     stab_rows=$(echo "$stab_out" | awk '{print $2}')
     stab_lines=${stab_lines:-0}
@@ -141,7 +175,7 @@ stabilize_vm() {
       stab_ok=true
       break
     fi
-    sleep 5
+    sleep "$poll_interval"
   done
 
   if [[ "$stab_ok" == "true" ]]; then

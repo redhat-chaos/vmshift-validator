@@ -1,0 +1,31 @@
+global:
+  measurements:
+  - name: vmiLatency
+
+jobs:
+  - name: vm-windows
+    jobType: create
+    jobIterations: 1
+    qps: 2
+    burst: 2
+    namespacedIterations: false
+    namespace: vm-services
+    verifyObjects: true
+    errorOnVerify: true
+    jobIterationDelay: 5s
+    waitWhenFinished: true
+    podWait: false
+    maxWaitTimeout: 30m
+    jobPause: 0s
+    cleanup: true
+    objects:
+
+    - objectTemplate: templates/vm-windows.yml
+      replicas: 2
+      inputVars:
+        name: vm-win
+        goldenPvcName: REPLACE_WIN_GOLDEN_PVC
+        goldenPvcNamespace: REPLACE_WIN_GOLDEN_NAMESPACE
+        oobeSysprepSecret: REPLACE_WIN_OOBE_SECRET
+        storageClassName: REPLACE_STORAGE_CLASS
+        rootDiskSize: REPLACE_WIN_ROOT_DISK_SIZE

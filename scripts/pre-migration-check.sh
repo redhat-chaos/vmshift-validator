@@ -19,6 +19,7 @@ SSH_READY_INTERVAL=10
 CHAOS_SCENARIO=""
 MIGRATION_PROFILE="gcp"
 CLUSTER_ROLE="source"
+VM_OS=""
 
 VM_DATA=""
 CLUSTER_SERVER=""
@@ -64,7 +65,11 @@ collect_cluster_info() {
 
 collect_vm_workload_data() {
   task.begin "Collecting VM workload data"
-  VM_DATA=$(collect_vm_data)
+  if is_windows_vm "$VM_OS"; then
+    VM_DATA=$(collect_vm_data_windows)
+  else
+    VM_DATA=$(collect_vm_data)
+  fi
   task.pass "VM workload data collected"
 }
 
@@ -299,6 +304,7 @@ while [[ $# -gt 0 ]]; do
     --chaos-scenario)  CHAOS_SCENARIO="$2"; shift 2 ;;
     --migration-profile) MIGRATION_PROFILE="$2"; shift 2 ;;
     --cluster-role)    CLUSTER_ROLE="$2"; shift 2 ;;
+    --vm-os)           VM_OS="$2"; shift 2 ;;
     *) echo "Unknown option: $1"; usage ;;
   esac
 done
@@ -309,7 +315,10 @@ done
 source "${SCRIPT_DIR}/lib/log.sh"
 source "${SCRIPT_DIR}/lib/executor.sh"
 source "${SCRIPT_DIR}/lib/ssh.sh"
+source "${SCRIPT_DIR}/lib/vm-os.sh"
+source "${SCRIPT_DIR}/lib/guest-agent.sh"
 source "${SCRIPT_DIR}/lib/vm-data-collector.sh"
+source "${SCRIPT_DIR}/lib/vm-data-collector-windows.sh"
 
 executor_load_profile "$MIGRATION_PROFILE" "$SCRIPT_DIR"
 if [[ "$MIGRATION_PROFILE" == "gcp" ]]; then
@@ -317,6 +326,10 @@ if [[ "$MIGRATION_PROFILE" == "gcp" ]]; then
 fi
 
 VM_CLUSTER="$CLUSTER_ROLE"
+
+if [[ -z "$VM_OS" ]]; then
+  VM_OS=$(detect_vm_os "$VM_NAME" "$NAMESPACE" "$CLUSTER_ROLE")
+fi
 mkdir -p "$OUTPUT_DIR"
 
 TIMESTAMP=$(date -u '+%Y%m%dT%H%M%SZ')
@@ -324,7 +337,11 @@ OUTPUT_FILE="${OUTPUT_DIR}/pre-migration-${VM_NAME}-${TIMESTAMP}.json"
 
 log.verbose "Pre-Migration Check: ${VM_NAME} (${TIMESTAMP})"
 
-wait_for_guest_ssh
+if is_windows_vm "$VM_OS"; then
+  wait_for_guest_agent
+else
+  wait_for_guest_ssh
+fi
 collect_cluster_info
 collect_vm_workload_data
 validate_vm_data

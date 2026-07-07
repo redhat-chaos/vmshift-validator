@@ -11,6 +11,9 @@ PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 source "${SCRIPT_DIR}/lib/log.sh"
 source "${SCRIPT_DIR}/lib/executor.sh"
 source "${SCRIPT_DIR}/lib/ssh.sh"
+source "${SCRIPT_DIR}/lib/vm-os.sh"
+source "${SCRIPT_DIR}/lib/guest-agent.sh"
+source "${SCRIPT_DIR}/lib/prometheus.sh"
 
 SOURCE_KUBECONFIG=""
 TARGET_KUBECONFIG=""
@@ -117,15 +120,26 @@ TARGET_NODE=""
 SOURCE_NODE=$(kubectl_source get vmi "$VM_NAME" -n "$NAMESPACE" \
   -o jsonpath='{.status.nodeName}' 2>/dev/null || echo "unknown")
 
+VM_OS=$(detect_vm_os "$VM_NAME" "$NAMESPACE" "source")
+
 # [1/4] Verify workloads on source
 step.begin "[1/4] VERIFY WORKLOADS (source)"
 VM_CLUSTER="source"
-task.begin "Waiting for SSH"
-if ! wait_for_guest_ssh; then
-  step.end "FAIL"
-  exit 1
+if is_windows_vm "$VM_OS"; then
+  task.begin "Waiting for guest agent"
+  if ! wait_for_guest_agent; then
+    step.end "FAIL"
+    exit 1
+  fi
+  task.pass "Guest agent ready"
+else
+  task.begin "Waiting for SSH"
+  if ! wait_for_guest_ssh; then
+    step.end "FAIL"
+    exit 1
+  fi
+  task.pass "SSH ready"
 fi
-task.pass "SSH ready"
 step.end "PASS"
 
 # [2/4] Pre-migration check
@@ -140,11 +154,27 @@ step.begin "[2/4] PRE-MIGRATION CHECK"
   --local-ssh-opts "$LOCAL_SSH_OPTS" \
   --ssh-ready-timeout "$SSH_READY_TIMEOUT" \
   --cluster-role source \
-  --migration-profile "$MIGRATION_PROFILE"
+  --migration-profile "$MIGRATION_PROFILE" \
+  --vm-os "$VM_OS"
 
 PRE_FILE="$(ls -t "${VM_REPORT_DIR}/pre-migration-${VM_NAME}-"*.json 2>/dev/null | head -1 || true)"
 [[ -n "$PRE_FILE" ]] || { log.error "Pre-migration JSON not found"; step.end "FAIL"; exit 1; }
 step.end "PASS"
+
+# Prometheus pre-migration baseline
+if [[ "${PROM_ENABLED:-true}" == "true" ]]; then
+  task.begin "Prometheus pre-migration baseline"
+  PROM_PRE_EPOCH=$(date +%s)
+  if "${SCRIPT_DIR}/capture-prometheus-metrics.sh" \
+      --vm "$VM_NAME" --namespace "$NAMESPACE" --phase pre \
+      --cluster-role source --migration-profile "$MIGRATION_PROFILE" \
+      --source-kubeconfig "$SOURCE_KUBECONFIG" --target-kubeconfig "$TARGET_KUBECONFIG" \
+      > "${VM_REPORT_DIR}/prometheus-pre-${VM_NAME}.json" 2>/dev/null; then
+    task.pass "Prometheus baseline captured"
+  else
+    log.warn "Prometheus pre-migration capture failed (non-fatal)"
+  fi
+fi
 
 # [3/4] Migrate + wait
 step.begin "[3/4] MIGRATE + WAIT"
@@ -152,8 +182,12 @@ if [[ -n "$PRE_MIGRATE_DELAY" ]] && [[ "$PRE_MIGRATE_DELAY" -gt 0 ]]; then
   log.info "Pre-migrate delay: sleeping ${PRE_MIGRATE_DELAY}s (chaos settle time)"
   sleep "$PRE_MIGRATE_DELAY"
 fi
+MIGRATE_API_KC="$SOURCE_KUBECONFIG"
+if [[ "${MIGRATION_API:-source}" == "target" ]]; then
+  MIGRATE_API_KC="$TARGET_KUBECONFIG"
+fi
 "${SCRIPT_DIR}/migrate-vm.sh" \
-  --kubeconfig "$SOURCE_KUBECONFIG" \
+  --kubeconfig "$MIGRATE_API_KC" \
   --vm "$VM_NAME" \
   --namespace "$NAMESPACE" \
   --template-dir "$TEMPLATE_DIR" \
@@ -169,13 +203,20 @@ MAX_ATTEMPTS="$MIGRATION_MAX_ATTEMPTS"
 LAST_STEP=""
 vm_phase="Pending"
 succ=""
+PROM_SNAPSHOTS_FILE=""
+if [[ "${PROM_ENABLED:-true}" == "true" ]]; then
+  PROM_SNAPSHOTS_FILE=$(mktemp /tmp/prom-snapshots-XXXXXX.json)
+  echo '[]' > "$PROM_SNAPSHOTS_FILE"
+fi
 
 for i in $(seq 1 "$MAX_ATTEMPTS"); do
   MIG_STATUS="$(kubectl_migration get migration "${VM_NAME}-migration" \
     -n "$MTV_NAMESPACE" -o json 2>/dev/null || echo '{}')"
 
   succ="$(echo "$MIG_STATUS" | jq -r '.status.conditions[]? | select(.type=="Succeeded") | .status' 2>/dev/null || echo "")"
+  failed="$(echo "$MIG_STATUS" | jq -r '.status.conditions[]? | select(.type=="Failed") | .status' 2>/dev/null || echo "")"
   vm_phase="$(echo "$MIG_STATUS" | jq -r '.status.vms[0].phase // "Pending"' 2>/dev/null || echo "Pending")"
+  vm_error="$(echo "$MIG_STATUS" | jq -r '.status.vms[0].error.reasons[0] // empty' 2>/dev/null || echo "")"
   current_step="$(echo "$MIG_STATUS" | jq -r '.status.vms[0].pipeline[]? | select(.phase != "Completed") | .name' 2>/dev/null | head -1 || echo "")"
   completed_steps="$(echo "$MIG_STATUS" | jq -r '[.status.vms[0].pipeline[]? | select(.phase == "Completed")] | length' 2>/dev/null || echo "0")"
   total_steps="$(echo "$MIG_STATUS" | jq -r '[.status.vms[0].pipeline[]?] | length' 2>/dev/null || echo "0")"
@@ -184,19 +225,20 @@ for i in $(seq 1 "$MAX_ATTEMPTS"); do
   ELAPSED_MIN=$((ELAPSED / 60))
   ELAPSED_SEC=$((ELAPSED % 60))
 
+  if [[ "$failed" == "True" ]] || [[ "$vm_phase" == "Failed" ]]; then
+    MIGRATION_DURATION_SEC="$ELAPSED"
+    MIGRATION_OUTCOME="failed"
+    MIGRATION_FAILED=true
+    [[ -n "$vm_error" ]] && log_info "Migration error: $vm_error"
+    step.end "FAIL"
+    break
+  fi
+
   if [[ "$vm_phase" == "Completed" ]] || [[ "$succ" == "True" ]]; then
     MIGRATION_DURATION_SEC="$ELAPSED"
     MIGRATION_OUTCOME="succeeded"
     task.pass "Migration completed" "(${ELAPSED_MIN}m${ELAPSED_SEC}s)"
     step.end "PASS"
-    break
-  fi
-
-  if [[ "$vm_phase" == "Failed" ]]; then
-    MIGRATION_DURATION_SEC="$ELAPSED"
-    MIGRATION_OUTCOME="failed"
-    MIGRATION_FAILED=true
-    step.end "FAIL"
     break
   fi
 
@@ -214,8 +256,50 @@ for i in $(seq 1 "$MAX_ATTEMPTS"); do
     LAST_STEP="$current_step"
   fi
   progress.update "${current_step:-Initializing}" "${completed_steps}/${total_steps} steps (${ELAPSED_MIN}m${ELAPSED_SEC}s)"
+
+  # Prometheus during-migration snapshot
+  if [[ -n "$PROM_SNAPSHOTS_FILE" ]]; then
+    PROM_SNAP=$("${SCRIPT_DIR}/capture-prometheus-metrics.sh" \
+      --vm "$VM_NAME" --namespace "$NAMESPACE" --phase during \
+      --cluster-role source --migration-profile "$MIGRATION_PROFILE" \
+      --source-kubeconfig "$SOURCE_KUBECONFIG" --target-kubeconfig "$TARGET_KUBECONFIG" \
+      --migration-start-epoch "$MIGRATION_START_TIME" 2>/dev/null || echo '{}')
+    jq --argjson snap "$PROM_SNAP" '. + [$snap]' "$PROM_SNAPSHOTS_FILE" > "${PROM_SNAPSHOTS_FILE}.tmp" \
+      && mv "${PROM_SNAPSHOTS_FILE}.tmp" "$PROM_SNAPSHOTS_FILE" 2>/dev/null || true
+  fi
+
   sleep "$MIGRATION_POLL_INTERVAL"
 done
+
+# Finalize Prometheus during-migration data
+if [[ -n "$PROM_SNAPSHOTS_FILE" ]]; then
+  PROM_END_EPOCH=$(date +%s)
+  PROM_TS_FILE=$(mktemp /tmp/prom-timeseries-XXXXXX.json)
+  "${SCRIPT_DIR}/capture-prometheus-metrics.sh" \
+    --vm "$VM_NAME" --namespace "$NAMESPACE" --phase during-finalize \
+    --cluster-role source --migration-profile "$MIGRATION_PROFILE" \
+    --source-kubeconfig "$SOURCE_KUBECONFIG" --target-kubeconfig "$TARGET_KUBECONFIG" \
+    --migration-start-epoch "$MIGRATION_START_TIME" \
+    --migration-end-epoch "$PROM_END_EPOCH" > "$PROM_TS_FILE" 2>/dev/null || echo '{}' > "$PROM_TS_FILE"
+  jq -n \
+    --arg vm "$VM_NAME" \
+    --arg ns "$NAMESPACE" \
+    --argjson mig_start "$MIGRATION_START_TIME" \
+    --argjson mig_end "$PROM_END_EPOCH" \
+    --slurpfile snapshots "$PROM_SNAPSHOTS_FILE" \
+    --slurpfile time_series "$PROM_TS_FILE" \
+    '{
+      type: "prometheus-during-migration",
+      vm_name: $vm,
+      namespace: $ns,
+      migration_start_epoch: $mig_start,
+      migration_end_epoch: $mig_end,
+      snapshots: $snapshots[0],
+      time_series: $time_series[0]
+    }' > "${VM_REPORT_DIR}/prometheus-during-${VM_NAME}.json" 2>/dev/null || \
+    log.warn "Prometheus during-migration finalization failed (non-fatal)"
+  rm -f "$PROM_SNAPSHOTS_FILE" "$PROM_TS_FILE" 2>/dev/null || true
+fi
 
 PIPELINE_TIMINGS="$(echo "$MIG_STATUS" | jq \
   '[.status.vms[0].pipeline[]? | {name, description, phase, started, completed}]' \
@@ -288,14 +372,33 @@ POST_EXIT=0
   --local-ssh-opts "$LOCAL_SSH_OPTS" \
   --ssh-ready-timeout "$POST_SSH_READY_TIMEOUT" \
   --cluster-role target \
-  --migration-profile "$MIGRATION_PROFILE" || POST_EXIT=$?
+  --migration-profile "$MIGRATION_PROFILE" \
+  --vm-os "$VM_OS" || POST_EXIT=$?
 
 if [[ "$POST_EXIT" -eq 0 ]]; then
   step.end "PASS"
+else
+  step.end "FAIL"
+fi
+
+# Prometheus post-migration capture (runs regardless of post-check verdict)
+if [[ "${PROM_ENABLED:-true}" == "true" ]]; then
+  task.begin "Prometheus post-migration capture"
+  if "${SCRIPT_DIR}/capture-prometheus-metrics.sh" \
+      --vm "$VM_NAME" --namespace "$NAMESPACE" --phase post \
+      --cluster-role target --migration-profile "$MIGRATION_PROFILE" \
+      --source-kubeconfig "$SOURCE_KUBECONFIG" --target-kubeconfig "$TARGET_KUBECONFIG" \
+      > "${VM_REPORT_DIR}/prometheus-post-${VM_NAME}.json" 2>/dev/null; then
+    task.pass "Prometheus post-migration captured"
+  else
+    log.warn "Prometheus post-migration capture failed (non-fatal)"
+  fi
+fi
+
+if [[ "$POST_EXIT" -eq 0 ]]; then
   log.banner "VM ${VM_NAME}: PASS"
   exit 0
 else
-  step.end "FAIL"
   log.banner "VM ${VM_NAME}: FAIL"
   exit 1
 fi

@@ -18,6 +18,7 @@ LOCAL_SSH_OPTS=""
 SSH_READY_TIMEOUT=600
 SSH_READY_INTERVAL=15
 CHAOS_SCENARIO=""
+VM_OS=""
 
 # Globals populated during execution
 VM_DATA=""
@@ -263,7 +264,11 @@ emit_partial_report_and_exit() {
 
 collect_vm_workload_data() {
   task.begin "Collecting VM workload data"
-  VM_DATA=$(collect_vm_data "$PRE_LOG_FILE_SIZE" "$PRE_DB_FILE_SIZE")
+  if is_windows_vm "$VM_OS"; then
+    VM_DATA=$(collect_vm_data_windows "$PRE_LOG_FILE_SIZE" "$PRE_DB_FILE_SIZE")
+  else
+    VM_DATA=$(collect_vm_data "$PRE_LOG_FILE_SIZE" "$PRE_DB_FILE_SIZE")
+  fi
   task.pass "VM workload data collected"
 }
 
@@ -296,7 +301,125 @@ validate_vm_data() {
   exit 1
 }
 
+run_gap_analysis_windows() {
+  task.begin "Analyzing data gaps (Windows)"
+  log.verbose "Fetching gap analysis data via guest agent..."
+
+  local gap_raw
+  gap_raw=$(run_on_vm_via_agent '
+$ErrorActionPreference = "SilentlyContinue"
+
+Write-Output "___SQLITE_GAP_START___"
+try {
+  $pyCode = @"
+import sqlite3, json, datetime
+try:
+    c = sqlite3.connect(r"C:\data\test\test.db")
+    rows = c.execute("SELECT id, timestamp FROM test ORDER BY id").fetchall()
+    if len(rows) < 2:
+        print("[]")
+    else:
+        epochs = [(r[0], int(r[1])) for r in rows if r[1]]
+        buckets = {}
+        for i in range(1, len(epochs)):
+            gap = epochs[i][1] - epochs[i-1][1]
+            ts = epochs[i][1]
+            bucket = (ts // 30) * 30
+            if bucket not in buckets:
+                buckets[bucket] = {"total": 0, "slow": 0, "max_gap": 0}
+            buckets[bucket]["total"] += 1
+            if gap > 2:
+                buckets[bucket]["slow"] += 1
+            if gap > buckets[bucket]["max_gap"]:
+                buckets[bucket]["max_gap"] = gap
+        result = []
+        for b in sorted(buckets):
+            d = buckets[b]
+            if d["slow"] > 0:
+                pct = round(d["slow"] * 100.0 / d["total"], 1)
+                status = "affected" if d["slow"] >= 5 else "jitter"
+                result.append({"time_window_utc": datetime.datetime.utcfromtimestamp(b).strftime("%Y-%m-%d %H:%M:%S"), "epoch": b, "total_inserts": d["total"], "slow_inserts": d["slow"], "slow_pct": pct, "max_gap_sec": d["max_gap"], "status": status})
+        print(json.dumps(result))
+except Exception:
+    print("[]")
+"@
+  & "C:\Program Files\Python312\python.exe" -c $pyCode 2>$null
+} catch { Write-Output "[]" }
+Write-Output "___SQLITE_GAP_END___"
+
+Write-Output "___FILE_WRITER_START___"
+if (Test-Path "C:\data\test\log.txt") {
+  Get-Content "C:\data\test\log.txt"
+}
+Write-Output "___FILE_WRITER_END___"
+
+# No ephemeral or cron on Windows
+Write-Output "___EPHEMERAL_FW_START___"
+Write-Output "___EPHEMERAL_FW_END___"
+Write-Output "___CRON_START___"
+Write-Output "___CRON_END___"
+' 2>/dev/null || true)
+
+  SQLITE_GAP_DATA=$(extract_gap_section "$gap_raw" "___SQLITE_GAP_START___" "___SQLITE_GAP_END___")
+  [[ -z "$SQLITE_GAP_DATA" ]] && SQLITE_GAP_DATA="[]"
+  SQLITE_GAP_DATA=$(json_or_empty_array "$SQLITE_GAP_DATA")
+
+  local fw_log
+  fw_log=$(extract_gap_section "$gap_raw" "___FILE_WRITER_START___" "___FILE_WRITER_END___")
+
+  log.verbose "Analyzing file-writer gaps (persistent C:\\data\\)..."
+  FILE_WRITER_GAP_DATA=$(echo "$fw_log" | python3 "${SCRIPT_DIR}/lib/gap-analyzer.py" \
+    --pattern '(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})' \
+    --format '%Y-%m-%dT%H:%M:%S' \
+    --expected-interval 1 \
+    --mode windows 2>/dev/null || echo "[]")
+  FILE_WRITER_GAP_DATA=$(json_or_empty_array "$FILE_WRITER_GAP_DATA")
+
+  EPHEMERAL_FILE_WRITER_GAP_DATA="[]"
+  CRON_GAP_DATA="[]"
+
+  AFFECTED_WINDOWS=$(echo "$SQLITE_GAP_DATA" | python3 -c "
+import json, sys
+try:
+    data = json.load(sys.stdin)
+    affected = [r for r in data if r.get('status') == 'affected']
+    if affected:
+        print(json.dumps({
+            'affected_from_utc': affected[0]['time_window_utc'],
+            'affected_to_utc': affected[-1]['time_window_utc'],
+            'affected_from_epoch': affected[0]['epoch'],
+            'affected_to_epoch': affected[-1]['epoch'],
+            'duration_sec': affected[-1]['epoch'] - affected[0]['epoch'] + 30,
+            'total_affected_windows': len(affected),
+            'total_slow_inserts_in_window': sum(r['slow_inserts'] for r in affected),
+            'total_inserts_in_window': sum(r['total_inserts'] for r in affected),
+            'avg_slow_pct': round(sum(r['slow_pct'] for r in affected) / len(affected), 1)
+        }))
+    else:
+        print(json.dumps({'affected_from_utc': 'none', 'affected_to_utc': 'none', 'duration_sec': 0, 'total_affected_windows': 0, 'total_slow_inserts_in_window': 0, 'total_inserts_in_window': 0, 'avg_slow_pct': 0}))
+except Exception:
+    print(json.dumps({'affected_from_utc': 'none', 'affected_to_utc': 'none', 'duration_sec': 0, 'total_affected_windows': 0, 'total_slow_inserts_in_window': 0, 'total_inserts_in_window': 0, 'avg_slow_pct': 0}))
+" 2>/dev/null || echo '{"affected_from_utc":"none","affected_to_utc":"none","duration_sec":0,"total_affected_windows":0,"total_slow_inserts_in_window":0,"total_inserts_in_window":0,"avg_slow_pct":0}')
+  AFFECTED_WINDOWS=$(json_or_empty_object "$AFFECTED_WINDOWS")
+
+  JITTER_COUNT=$(echo "$SQLITE_GAP_DATA" | python3 -c "
+import json, sys
+try:
+    data = json.load(sys.stdin)
+    print(len([r for r in data if r.get('status') == 'jitter']))
+except Exception:
+    print(0)
+" 2>/dev/null || echo "0")
+
+  task.pass "Gap analysis complete"
+}
+
 run_gap_analysis() {
+  if is_windows_vm "$VM_OS"; then
+    run_gap_analysis_windows
+    return
+  fi
+
   task.begin "Analyzing data gaps"
   log.verbose "Fetching all gap analysis data in single SSH call..."
 
@@ -1123,10 +1246,14 @@ compute_verdict() {
   SERVICES_RUNNING_STATUS="PASS"
   if [[ "$(get_val FILE_WRITER_PID)" == "none" ]] || \
      [[ "$(get_val SQLITE_PID)" == "none" ]] || \
-     [[ "$(get_val HTTP_PID)" == "none" ]] || \
-     [[ "$(get_val EPHEMERAL_FILE_WRITER_PID)" == "none" ]] || \
-     [[ "$(get_val EPHEMERAL_SQLITE_PID)" == "none" ]]; then
+     [[ "$(get_val HTTP_PID)" == "none" ]]; then
     SERVICES_RUNNING_STATUS="FAIL"
+  fi
+  if ! is_windows_vm "$VM_OS"; then
+    if [[ "$(get_val EPHEMERAL_FILE_WRITER_PID)" == "none" ]] || \
+       [[ "$(get_val EPHEMERAL_SQLITE_PID)" == "none" ]]; then
+      SERVICES_RUNNING_STATUS="FAIL"
+    fi
   fi
 
   OVERALL="PASS"
@@ -1262,6 +1389,7 @@ while [[ $# -gt 0 ]]; do
     --chaos-scenario)      CHAOS_SCENARIO="$2"; shift 2 ;;
     --migration-profile)   MIGRATION_PROFILE="$2"; shift 2 ;;
     --cluster-role)        CLUSTER_ROLE="$2"; shift 2 ;;
+    --vm-os)               VM_OS="$2"; shift 2 ;;
     *) echo "Unknown option: $1"; usage ;;
   esac
 done
@@ -1272,7 +1400,10 @@ done
 source "${SCRIPT_DIR}/lib/log.sh"
 source "${SCRIPT_DIR}/lib/executor.sh"
 source "${SCRIPT_DIR}/lib/ssh.sh"
+source "${SCRIPT_DIR}/lib/vm-os.sh"
+source "${SCRIPT_DIR}/lib/guest-agent.sh"
 source "${SCRIPT_DIR}/lib/vm-data-collector.sh"
+source "${SCRIPT_DIR}/lib/vm-data-collector-windows.sh"
 
 MIGRATION_PROFILE="${MIGRATION_PROFILE:-gcp}"
 CLUSTER_ROLE="${CLUSTER_ROLE:-target}"
@@ -1283,6 +1414,10 @@ if [[ "$MIGRATION_PROFILE" == "gcp" ]]; then
 fi
 
 VM_CLUSTER="$CLUSTER_ROLE"
+
+if [[ -z "$VM_OS" ]]; then
+  VM_OS=$(detect_vm_os "$VM_NAME" "$NAMESPACE" "$CLUSTER_ROLE")
+fi
 mkdir -p "$OUTPUT_DIR"
 
 TIMESTAMP=$(date -u '+%Y%m%dT%H%M%SZ')
@@ -1294,8 +1429,14 @@ log.verbose "Post-Migration Check: ${VM_NAME} (${TIMESTAMP})"
 parse_pre_migration_sizes
 collect_cluster_info
 collect_migration_transfer_stats
-if ! wait_for_guest_ssh; then
-  emit_partial_report_and_exit
+if is_windows_vm "$VM_OS"; then
+  if ! wait_for_guest_agent; then
+    emit_partial_report_and_exit
+  fi
+else
+  if ! wait_for_guest_ssh; then
+    emit_partial_report_and_exit
+  fi
 fi
 collect_vm_workload_data
 validate_vm_data

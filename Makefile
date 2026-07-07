@@ -114,6 +114,11 @@ STORAGE_MAP_NAME ?= blue-green-storage-map
 # kubeconfig access; "baremetal-l2" routes commands through SSH bastions.
 MIGRATION_PROFILE ?= gcp
 
+# Which cluster hosts the Forklift (MTV) operator and CRDs. "source" means
+# Plans/Migrations are created on the source cluster; "target" means they
+# are created on the target cluster. Controls kubectl_migration routing.
+MIGRATION_API ?= source
+
 # Kubernetes StorageClass used for VM data volumes created by kube-burner.
 # Substituted into kube-burner configs via render-config.
 STORAGE_CLASS ?= standard-csi
@@ -132,6 +137,46 @@ GENERATED_DIR ?= $(SCRIPTS_DIR)/generated
 # Directory containing Forklift YAML templates (migration-plan.yaml.template,
 # migration.yaml.template) with REPLACE_* placeholders.
 TEMPLATE_DIR ?= $(PROJECT_DIR)/templates
+
+# ── Windows VM settings ─────────────────────────────────────────
+
+# Name of the golden image PVC to clone for Windows VMs.
+WIN_GOLDEN_PVC ?= win2022-golden
+
+# Namespace containing the golden image PVC and OOBE unattend secret.
+WIN_GOLDEN_NAMESPACE ?= windows-golden-images
+
+# Name of the Secret containing unattend.xml for Windows OOBE auto-completion.
+WIN_OOBE_SECRET ?= win2022-oobe-unattend
+
+# Root disk size for cloned Windows VMs.
+WIN_ROOT_DISK_SIZE ?= 40Gi
+
+# Max seconds to wait for QEMU guest agent readiness on Windows VMs.
+GA_READY_TIMEOUT ?= 300
+
+# Seconds between guest agent readiness polls.
+GA_READY_INTERVAL ?= 15
+
+# ── Prometheus metric capture ──────────────────────────────────
+
+# Enable Prometheus metric capture during migration (true/false).
+PROM_ENABLED ?= true
+
+# Namespace where Prometheus runs (openshift-monitoring on OCP).
+PROM_NAMESPACE ?= openshift-monitoring
+
+# Pod name for kubectl exec into Prometheus.
+PROM_POD ?= prometheus-k8s-0
+
+# Container within the Prometheus pod.
+PROM_CONTAINER ?= prometheus
+
+# Prometheus localhost URL inside the pod.
+PROM_URL ?= http://localhost:9090
+
+# Step interval for Prometheus range queries.
+PROM_RANGE_STEP ?= 15s
 
 # ── Timeouts and tuning ─────────────────────────────────────────
 
@@ -186,6 +231,9 @@ COMMON_ARGS := \
 	--ssh-user $(SSH_USER) \
 	--local-ssh-opts "$(LOCAL_SSH_OPTS)"
 
+export MIGRATION_API
+export PROM_ENABLED PROM_NAMESPACE PROM_POD PROM_CONTAINER PROM_URL PROM_RANGE_STEP
+
 MIGRATION_ARGS := \
 	--mtv-namespace $(MTV_NAMESPACE) \
 	--migration-profile $(MIGRATION_PROFILE) \
@@ -229,6 +277,8 @@ help: ## Show help
 	@echo "  make density-setup              Create VMs via kube-burner"
 	@echo "  make density-setup KUBE_BURNER_CONFIG=vm-services-heavy.yml"
 	@echo "                                  Create VMs with memory-heavy workloads"
+	@echo "  make density-setup KUBE_BURNER_CONFIG=vm-windows.yml"
+	@echo "                                  Create Windows VMs from golden image"
 	@echo "  make density-status             Show VM status on source"
 	@echo "  make density-teardown           Remove VMs from both clusters"
 	@echo ""
@@ -267,6 +317,9 @@ help: ## Show help
 	@echo "              NETWORK_MAP_NAME  STORAGE_MAP_NAME"
 	@echo "  Tuning:     LOG_LEVEL  STABILIZE_WAIT  SSH_READY_TIMEOUT  POST_SSH_READY_TIMEOUT"
 	@echo "              MIGRATION_MAX_ATTEMPTS  MIGRATION_POLL_INTERVAL"
+	@echo "  Windows:    WIN_GOLDEN_PVC  WIN_GOLDEN_NAMESPACE  WIN_OOBE_SECRET  WIN_ROOT_DISK_SIZE"
+	@echo "  Prometheus: PROM_ENABLED  PROM_NAMESPACE  PROM_POD  PROM_RANGE_STEP"
+	@echo "              GA_READY_TIMEOUT  GA_READY_INTERVAL"
 	@echo "  Tags:       RUN_TAG  RUN_ID"
 	@echo "  Selectors:  VMS  N  SELECTOR  KUBE_BURNER_CONFIG"
 	@echo ""
@@ -317,26 +370,27 @@ check-clusters: ## Verify connectivity to source and target clusters
 	@KUBECONFIG=$(TARGET_KUBECONFIG) kubectl cluster-info 2>/dev/null || { echo "UNREACHABLE"; exit 1; }
 
 check-forklift: ## Verify Forklift/MTV CRDs and provider mappings
-	@echo "Checking Forklift CRDs on source cluster..."
-	@KUBECONFIG=$(SOURCE_KUBECONFIG) kubectl get crd plans.forklift.konveyor.io >/dev/null 2>&1 || \
+	$(eval FORKLIFT_KC := $(if $(filter target,$(MIGRATION_API)),$(TARGET_KUBECONFIG),$(SOURCE_KUBECONFIG)))
+	@echo "Checking Forklift CRDs (MIGRATION_API=$(MIGRATION_API))..."
+	@KUBECONFIG=$(FORKLIFT_KC) kubectl get crd plans.forklift.konveyor.io >/dev/null 2>&1 || \
 		{ echo "ERROR: Forklift Plan CRD not found"; exit 1; }
-	@KUBECONFIG=$(SOURCE_KUBECONFIG) kubectl get crd migrations.forklift.konveyor.io >/dev/null 2>&1 || \
+	@KUBECONFIG=$(FORKLIFT_KC) kubectl get crd migrations.forklift.konveyor.io >/dev/null 2>&1 || \
 		{ echo "ERROR: Forklift Migration CRD not found"; exit 1; }
 	@echo "  CRDs: OK"
 	@echo ""
 	@echo "Checking provider mappings in $(MTV_NAMESPACE)..."
-	@KUBECONFIG=$(SOURCE_KUBECONFIG) kubectl get networkmap $(NETWORK_MAP_NAME) -n $(MTV_NAMESPACE) >/dev/null 2>&1 && \
+	@KUBECONFIG=$(FORKLIFT_KC) kubectl get networkmap $(NETWORK_MAP_NAME) -n $(MTV_NAMESPACE) >/dev/null 2>&1 && \
 		echo "  NetworkMap '$(NETWORK_MAP_NAME)': OK" || \
 		echo "  WARNING: NetworkMap '$(NETWORK_MAP_NAME)' not found in $(MTV_NAMESPACE)"
-	@KUBECONFIG=$(SOURCE_KUBECONFIG) kubectl get storagemap $(STORAGE_MAP_NAME) -n $(MTV_NAMESPACE) >/dev/null 2>&1 && \
+	@KUBECONFIG=$(FORKLIFT_KC) kubectl get storagemap $(STORAGE_MAP_NAME) -n $(MTV_NAMESPACE) >/dev/null 2>&1 && \
 		echo "  StorageMap '$(STORAGE_MAP_NAME)': OK" || \
 		echo "  WARNING: StorageMap '$(STORAGE_MAP_NAME)' not found in $(MTV_NAMESPACE)"
 	@echo ""
 	@echo "Checking providers..."
-	@KUBECONFIG=$(SOURCE_KUBECONFIG) kubectl get provider $(PROVIDER_SOURCE_NAME) -n $(MTV_NAMESPACE) >/dev/null 2>&1 && \
+	@KUBECONFIG=$(FORKLIFT_KC) kubectl get provider $(PROVIDER_SOURCE_NAME) -n $(MTV_NAMESPACE) >/dev/null 2>&1 && \
 		echo "  Source provider '$(PROVIDER_SOURCE_NAME)': OK" || \
 		echo "  WARNING: Source provider '$(PROVIDER_SOURCE_NAME)' not found in $(MTV_NAMESPACE)"
-	@KUBECONFIG=$(SOURCE_KUBECONFIG) kubectl get provider $(PROVIDER_DEST_NAME) -n $(MTV_NAMESPACE) >/dev/null 2>&1 && \
+	@KUBECONFIG=$(FORKLIFT_KC) kubectl get provider $(PROVIDER_DEST_NAME) -n $(MTV_NAMESPACE) >/dev/null 2>&1 && \
 		echo "  Dest provider '$(PROVIDER_DEST_NAME)': OK" || \
 		echo "  WARNING: Dest provider '$(PROVIDER_DEST_NAME)' not found in $(MTV_NAMESPACE)"
 	@echo ""
@@ -366,9 +420,11 @@ endif
 	@echo "  Target: $(TARGET_KUBECONFIG)"
 
 render-config: ## Render kube-burner config by substituting Makefile variables
-	@if [[ -z "$(SSH_PUBLIC_KEY)" ]]; then \
-		echo "ERROR: SSH_PUBLIC_KEY is empty. Run 'make generate-keys' first or set SSH_PUBLIC_KEY=..."; \
-		exit 1; \
+	@if echo "$(KUBE_BURNER_CONFIG)" | grep -qv windows; then \
+		if [[ -z "$(SSH_PUBLIC_KEY)" ]]; then \
+			echo "ERROR: SSH_PUBLIC_KEY is empty. Run 'make generate-keys' first or set SSH_PUBLIC_KEY=..."; \
+			exit 1; \
+		fi; \
 	fi
 	@sed \
 		-e 's|REPLACE_SSH_PUBLIC_KEY|$(SSH_PUBLIC_KEY)|g' \
@@ -377,6 +433,10 @@ render-config: ## Render kube-burner config by substituting Makefile variables
 		-e 's|REPLACE_STORAGE_CLASS|$(STORAGE_CLASS)|g' \
 		-e 's|REPLACE_CONTAINER_IMAGE|$(CONTAINER_IMAGE)|g' \
 		-e 's|REPLACE_TARGET_NODE|$(TARGET_NODE)|g' \
+		-e 's|REPLACE_WIN_GOLDEN_PVC|$(WIN_GOLDEN_PVC)|g' \
+		-e 's|REPLACE_WIN_GOLDEN_NAMESPACE|$(WIN_GOLDEN_NAMESPACE)|g' \
+		-e 's|REPLACE_WIN_OOBE_SECRET|$(WIN_OOBE_SECRET)|g' \
+		-e 's|REPLACE_WIN_ROOT_DISK_SIZE|$(WIN_ROOT_DISK_SIZE)|g' \
 		"$(KUBE_BURNER_DIR)/$(KUBE_BURNER_CONFIG)" \
 		> "$(KUBE_BURNER_DIR)/$(RENDERED_CONFIG)"
 	@echo "Rendered: $(KUBE_BURNER_DIR)/$(RENDERED_CONFIG)"
@@ -386,7 +446,7 @@ render-config: ## Render kube-burner config by substituting Makefile variables
 # ═══════════════════════════════════════════════════════════════
 
 density-setup: render-config ## Run kube-burner and stabilize workloads
-	@LOG_LEVEL=$(LOG_LEVEL) $(SCRIPTS_DIR)/density-setup.sh \
+	@LOG_LEVEL=$(LOG_LEVEL) GA_READY_TIMEOUT=$(GA_READY_TIMEOUT) GA_READY_INTERVAL=$(GA_READY_INTERVAL) $(SCRIPTS_DIR)/density-setup.sh \
 		--kubeconfig $(SOURCE_KUBECONFIG) \
 		--config $(RENDERED_CONFIG) \
 		--kube-burner-dir $(KUBE_BURNER_DIR) \
@@ -452,8 +512,9 @@ migrate-dry-run: ## Render migration manifests without applying (VM=name)
 ifndef VM
 	$(error Specify VM=vm-name)
 endif
+	$(eval FORKLIFT_KC := $(if $(filter target,$(MIGRATION_API)),$(TARGET_KUBECONFIG),$(SOURCE_KUBECONFIG)))
 	@$(SCRIPTS_DIR)/migrate-vm.sh \
-		--kubeconfig $(SOURCE_KUBECONFIG) \
+		--kubeconfig $(FORKLIFT_KC) \
 		--vm $(VM) \
 		--namespace $(NAMESPACE) \
 		--template-dir $(TEMPLATE_DIR) \
@@ -476,6 +537,9 @@ report: ## Show latest migration summary
 
 list-reports: ## List all report runs
 	@ls -lt $(REPORTS_DIR)/run-* 2>/dev/null || echo "No reports found."
+
+pull-reports: ## Pull reports from remote bastion to local machine
+	@./pull-reports.sh
 
 logs: ## Show latest kube-burner log
 	@LATEST=$$(ls -t $(KUBE_BURNER_DIR)/kube-burner-*.log 2>/dev/null | head -1); \

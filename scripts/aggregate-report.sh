@@ -88,6 +88,86 @@ print('PASS' if ok else 'FAIL')
     ' "$post_file" 2>/dev/null || echo '{}')
   fi
 
+  # Prometheus metrics summary
+  prom_summary="{}"
+  if [[ -f "${vm_dir}/prometheus-pre-${vm}.json" ]] || \
+     [[ -f "${vm_dir}/prometheus-post-${vm}.json" ]] || \
+     [[ -f "${vm_dir}/prometheus-during-${vm}.json" ]]; then
+    prom_summary=$(python3 -c "
+import json, sys, os
+
+def load_json(path):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except:
+        return {}
+
+def get_val(metrics, category, key):
+    try:
+        v = metrics.get(category, {}).get(key, {})
+        if isinstance(v, list) and v:
+            return float(v[0].get('value') or 0)
+        return float(v.get('value') or 0)
+    except:
+        return 0
+
+vm_dir = '${vm_dir}'
+vm = '${vm}'
+pre = load_json(os.path.join(vm_dir, f'prometheus-pre-{vm}.json'))
+post = load_json(os.path.join(vm_dir, f'prometheus-post-{vm}.json'))
+during = load_json(os.path.join(vm_dir, f'prometheus-during-{vm}.json'))
+
+summary = {}
+
+# Pre/post CPU and memory deltas
+if pre.get('metrics') and post.get('metrics'):
+    pre_cpu = get_val(pre['metrics'], 'cpu', 'cpu_usage_seconds_total')
+    post_cpu = get_val(post['metrics'], 'cpu', 'cpu_usage_seconds_total')
+    pre_mem = get_val(pre['metrics'], 'memory', 'memory_used_bytes')
+    post_mem = get_val(post['metrics'], 'memory', 'memory_used_bytes')
+    pre_rx = get_val(pre['metrics'], 'network', 'network_receive_bytes_total')
+    post_rx = get_val(post['metrics'], 'network', 'network_receive_bytes_total')
+    summary['pre_cpu_usage_sec'] = pre_cpu
+    summary['post_cpu_usage_sec'] = post_cpu
+    summary['pre_memory_used_bytes'] = int(pre_mem)
+    summary['post_memory_used_bytes'] = int(post_mem)
+    summary['pre_network_rx_bytes'] = int(pre_rx)
+    summary['post_network_rx_bytes'] = int(post_rx)
+
+# During-migration stats
+snapshots = during.get('snapshots', [])
+summary['migration_snapshots_count'] = len(snapshots)
+if snapshots:
+    dirty_rates = []
+    transfer_rates = []
+    for s in snapshots:
+        mp = s.get('migration_progress', {})
+        dr = mp.get('dirty_memory_rate_bytes')
+        tr = mp.get('memory_transfer_rate_bytes')
+        if dr is not None:
+            try: dirty_rates.append(float(dr))
+            except: pass
+        if tr is not None:
+            try: transfer_rates.append(float(tr))
+            except: pass
+    if dirty_rates:
+        summary['peak_dirty_memory_rate_bytes'] = max(dirty_rates)
+    if transfer_rates:
+        summary['peak_memory_transfer_rate_bytes'] = max(transfer_rates)
+
+# Operator health
+for phase_name, phase_data in [('source', pre), ('target', post)]:
+    oh = phase_data.get('operator_health', {})
+    if oh:
+        health_keys = ['virt_api_up', 'virt_controller_up', 'virt_handler_up']
+        all_up = all(float(oh.get(k) or 0) > 0 for k in health_keys if k in oh)
+        summary[f'operator_health_{phase_name}'] = all_up
+
+json.dump(summary, sys.stdout)
+" 2>/dev/null || echo '{}')
+  fi
+
   if [[ "$verdict" == "PASS" ]]; then
     PASSED=$((PASSED + 1))
   else
@@ -101,7 +181,8 @@ print('PASS' if ok else 'FAIL')
     --argjson forklift_dur "${forklift_duration:-0}" \
     --argjson transfer "$transfer_stats" \
     --argjson failed_checks "$failed_checks" \
-    '{vm: $vm, verdict: $verdict, migration_duration_sec: $duration, forklift_duration_sec: $forklift_dur, failed_checks: $failed_checks} + (if $transfer != {} then {transfer_stats: $transfer} else {} end)')
+    --argjson prom_summary "$prom_summary" \
+    '{vm: $vm, verdict: $verdict, migration_duration_sec: $duration, forklift_duration_sec: $forklift_dur, failed_checks: $failed_checks} + (if $transfer != {} then {transfer_stats: $transfer} else {} end) + (if $prom_summary != {} then {prometheus_summary: $prom_summary} else {} end)')
 
   RESULTS_JSON=$(echo "$RESULTS_JSON" | jq --argjson entry "$entry" '. + [$entry]')
 done

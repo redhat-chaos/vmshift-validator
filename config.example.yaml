@@ -63,6 +63,10 @@ storage_map_name: blue-green-storage-map
 # Execution profile: "gcp" (direct kubeconfig) or "baremetal-l2" (SSH bastions).
 migration_profile: gcp
 
+# Which cluster hosts the Forklift (MTV) operator. "source" or "target".
+# Controls which kubeconfig is used for Plan/Migration CR operations.
+migration_api: source
+
 # StorageClass for VM data volumes created by kube-burner.
 storage_class: standard-csi
 
@@ -88,3 +92,44 @@ migration_max_attempts: 60
 
 # Seconds between Forklift Migration status polls.
 migration_poll_interval: 10
+
+# ── Windows VM settings ─────────────────────────────────────────
+
+# Golden image PVC name to clone for Windows VMs.
+win_golden_pvc: win2022-golden
+
+# Namespace containing the golden image PVC and OOBE unattend secret.
+win_golden_namespace: windows-golden-images
+
+# Secret name containing unattend.xml for Windows OOBE auto-completion.
+win_oobe_secret: win2022-oobe-unattend
+
+# Root disk size for cloned Windows VMs.
+win_root_disk_size: 40Gi
+
+# Max seconds to wait for QEMU guest agent readiness on Windows VMs.
+ga_ready_timeout: 300
+
+# Seconds between guest agent readiness polls.
+ga_ready_interval: 15
+
+# ── Prometheus metric capture ──────────────────────────────────
+
+# Enable/disable Prometheus metric capture during migration.
+# When enabled, captures KubeVirt and MTV metrics at pre/during/post phases.
+prom_enabled: true
+
+# Namespace where Prometheus runs on both clusters.
+prom_namespace: openshift-monitoring
+
+# Prometheus pod name to exec into for queries.
+prom_pod: prometheus-k8s-0
+
+# Container name within the Prometheus pod.
+prom_container: prometheus
+
+# Prometheus base URL (inside the pod, via localhost).
+prom_url: "http://localhost:9090"
+
+# Step interval for range queries during migration (e.g., "15s", "30s").
+prom_range_step: "15s"

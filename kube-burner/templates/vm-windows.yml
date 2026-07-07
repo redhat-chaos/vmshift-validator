@@ -1,0 +1,83 @@
+apiVersion: cdi.kubevirt.io/v1beta1
+kind: DataVolume
+metadata:
+  name: {{.name}}-{{ printf "%.8s" .UUID }}-{{.Replica}}-rootdisk
+  annotations:
+    cdi.kubevirt.io/storage.bind.immediate.requested: "true"
+spec:
+  pvc:
+    accessModes:
+      - ReadWriteOnce
+    resources:
+      requests:
+        storage: {{.rootDiskSize}}
+    storageClassName: {{.storageClassName}}
+  source:
+    pvc:
+      namespace: {{.goldenPvcNamespace}}
+      name: {{.goldenPvcName}}
+---
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: {{.name}}-{{ printf "%.8s" .UUID }}-{{.Replica}}
+  labels:
+    app: {{.name}}-{{ printf "%.8s" .UUID }}-{{.Replica}}
+    migration.forklift.konveyor.io/eligible: "true"
+    vm-os: windows
+    vm-size: large
+    workload-type: services-test
+spec:
+  runStrategy: Always
+  template:
+    metadata:
+      labels:
+        kubevirt.io/vm: {{.name}}-{{ printf "%.8s" .UUID }}-{{.Replica}}
+        app: {{.name}}-{{ printf "%.8s" .UUID }}-{{.Replica}}
+        vm-name: {{.name}}-{{ printf "%.8s" .UUID }}-{{.Replica}}
+        workload-type: services-test
+    spec:
+      domain:
+        cpu:
+          cores: 4
+        features:
+          acpi: {}
+          hyperv:
+            relaxed: {}
+            vapic: {}
+            spinlocks:
+              spinlocks: 8191
+          smm:
+            enabled: true
+        firmware:
+          bootloader:
+            efi:
+              secureBoot: true
+        machine:
+          type: q35
+        devices:
+          disks:
+            - disk:
+                bus: sata
+              name: rootdisk
+            - cdrom:
+                bus: sata
+              name: sysprep
+          interfaces:
+            - name: default
+              masquerade: {}
+              model: virtio
+        resources:
+          requests:
+            memory: 8Gi
+      networks:
+        - name: default
+          pod: {}
+      volumes:
+        - name: rootdisk
+          dataVolume:
+            name: {{.name}}-{{ printf "%.8s" .UUID }}-{{.Replica}}-rootdisk
+        - name: sysprep
+          sysprep:
+            secret:
+              name: {{.oobeSysprepSecret}}

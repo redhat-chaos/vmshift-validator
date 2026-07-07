@@ -11,5 +11,6 @@ rsync -avz \
   --exclude='.git/' \
   --exclude='infra/' \
   --exclude='.config.mk' \
+  --exclude='config.yaml' \
   "${SCRIPT_DIR}/" \
   "${REMOTE_HOST}:${REMOTE_PATH}/"

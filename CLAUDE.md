@@ -136,6 +136,7 @@ make e2e VMS=vm-svc-0                 # prereqs → setup → migrate → report
 | `SSH_USER` | `fedora` | Guest OS user |
 | `KUBE_BURNER_CONFIG` | `vm-services.yml` | kube-burner job file |
 | `MIGRATION_PROFILE` | `gcp` | `gcp` or `baremetal-l2` |
+| `MIGRATION_API` | `source` | Which cluster has Forklift: `source` or `target` |
 | `STORAGE_CLASS` | `standard-csi` | StorageClass for VM data volumes |
 | `VM_LABEL_SELECTOR` | `workload-type=services-test` | VM discovery label |
 | `LOG_LEVEL` | `1` | 1=info, 2=verbose, 3=debug |

@@ -28,6 +28,7 @@ POST_SSH_READY_TIMEOUT="${POST_SSH_READY_TIMEOUT:-225}"
 MIGRATION_PROFILE="${MIGRATION_PROFILE:-gcp}"
 MIGRATION_MAX_ATTEMPTS="${MIGRATION_MAX_ATTEMPTS:-60}"
 MIGRATION_POLL_INTERVAL="${MIGRATION_POLL_INTERVAL:-10}"
+PRE_MIGRATE_DELAY=""
 PROVIDER_SOURCE="${PROVIDER_SOURCE_NAME:-host}"
 PROVIDER_DEST="${PROVIDER_DEST_NAME:-green-cluster}"
 NETWORK_MAP="${NETWORK_MAP_NAME:-blue-green-network-map}"
@@ -82,6 +83,7 @@ while [[ $# -gt 0 ]]; do
     --post-ssh-timeout)  POST_SSH_READY_TIMEOUT="$2"; shift 2 ;;
     --max-attempts)      MIGRATION_MAX_ATTEMPTS="$2"; shift 2 ;;
     --poll-interval)     MIGRATION_POLL_INTERVAL="$2"; shift 2 ;;
+    --pre-migrate-delay) PRE_MIGRATE_DELAY="$2"; shift 2 ;;
     -h|--help)           usage ;;
     *)                   echo "Unknown option: $1"; usage ;;
   esac
@@ -108,6 +110,12 @@ MIGRATION_FAILED=false
 MIGRATION_START_TIME=$(date +%s)
 MIGRATION_DURATION_SEC=0
 MIGRATION_OUTCOME="unknown"
+SOURCE_NODE=""
+TARGET_NODE=""
+
+# Capture source node placement before migration
+SOURCE_NODE=$(kubectl_source get vmi "$VM_NAME" -n "$NAMESPACE" \
+  -o jsonpath='{.status.nodeName}' 2>/dev/null || echo "unknown")
 
 # [1/4] Verify workloads on source
 step.begin "[1/4] VERIFY WORKLOADS (source)"
@@ -140,6 +148,10 @@ step.end "PASS"
 
 # [3/4] Migrate + wait
 step.begin "[3/4] MIGRATE + WAIT"
+if [[ -n "$PRE_MIGRATE_DELAY" ]] && [[ "$PRE_MIGRATE_DELAY" -gt 0 ]]; then
+  log.info "Pre-migrate delay: sleeping ${PRE_MIGRATE_DELAY}s (chaos settle time)"
+  sleep "$PRE_MIGRATE_DELAY"
+fi
 "${SCRIPT_DIR}/migrate-vm.sh" \
   --kubeconfig "$SOURCE_KUBECONFIG" \
   --vm "$VM_NAME" \
@@ -209,11 +221,37 @@ PIPELINE_TIMINGS="$(echo "$MIG_STATUS" | jq \
   '[.status.vms[0].pipeline[]? | {name, description, phase, started, completed}]' \
   2>/dev/null || echo '[]')"
 
+# Compute per-step durations and total Forklift migration duration
+PIPELINE_TIMINGS="$(echo "$PIPELINE_TIMINGS" | jq '
+  [.[] | . + {
+    duration_sec: (
+      if .started and .completed then
+        (((.completed) | sub("\\.[0-9]+Z$"; "Z") | strptime("%Y-%m-%dT%H:%M:%SZ") | mktime) -
+         ((.started)   | sub("\\.[0-9]+Z$"; "Z") | strptime("%Y-%m-%dT%H:%M:%SZ") | mktime))
+      else null end
+    )
+  }]
+' 2>/dev/null || echo "$PIPELINE_TIMINGS")"
+
+FORKLIFT_DURATION_SEC="$(echo "$PIPELINE_TIMINGS" | jq '
+  if length > 0 then
+    ((.[length-1].completed // empty) | sub("\\.[0-9]+Z$"; "Z") | strptime("%Y-%m-%dT%H:%M:%SZ") | mktime) -
+    ((.[ 0].started   // empty) | sub("\\.[0-9]+Z$"; "Z") | strptime("%Y-%m-%dT%H:%M:%SZ") | mktime)
+  else 0 end
+' 2>/dev/null || echo 0)"
+
+# Capture target node placement after migration
+TARGET_NODE=$(kubectl_target get vmi "$VM_NAME" -n "$NAMESPACE" \
+  -o jsonpath='{.status.nodeName}' 2>/dev/null || echo "unknown")
+
 jq -n \
   --arg vm "$VM_NAME" \
   --arg ns "$NAMESPACE" \
   --arg outcome "$MIGRATION_OUTCOME" \
+  --arg source_node "$SOURCE_NODE" \
+  --arg target_node "$TARGET_NODE" \
   --argjson duration "${MIGRATION_DURATION_SEC:-0}" \
+  --argjson forklift_duration "${FORKLIFT_DURATION_SEC:-0}" \
   --argjson start_epoch "$MIGRATION_START_TIME" \
   --argjson pipeline "$PIPELINE_TIMINGS" \
   '{
@@ -222,7 +260,10 @@ jq -n \
     migration: {
       outcome: $outcome,
       duration_sec: $duration,
+      forklift_duration_sec: $forklift_duration,
       start_epoch: $start_epoch,
+      source_node: $source_node,
+      target_node: $target_node,
       pipeline_steps: $pipeline
     }
   }' > "${VM_REPORT_DIR}/migration-metrics-${VM_NAME}.json"

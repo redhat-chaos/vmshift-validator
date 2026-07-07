@@ -98,11 +98,28 @@ if not gaps:
 ```
 
 ### Pass/Fail checklist
-- [ ] Post line count >= pre line count (no file-writer data loss)
-- [ ] Post row count >= pre row count (no SQLite data loss)
-- [ ] Post cron lines >= pre cron lines
-- [ ] Services are actively writing on target (counts grow over 5s)
-- [ ] PIDs same pre/post (confirms live migration, not cold)
-- [ ] SQLite integrity = ok on target
-- [ ] Largest SQLite gap roughly matches migration duration (not 10x larger)
-- [ ] No unexplained gaps outside the migration window
+- [x] Post line count >= pre line count (no file-writer data loss)
+- [x] Post row count >= pre row count (no SQLite data loss)
+- [x] Post cron lines >= pre cron lines
+- [x] Services are actively writing on target (counts grow over 5s)
+- [x] PIDs same pre/post (confirms live migration, not cold)
+- [x] SQLite integrity = ok on target
+- [x] Largest SQLite gap roughly matches migration duration (not 10x larger)
+- [x] No unexplained gaps outside the migration window
+
+## Test Execution Results
+
+**Date**: 2026-06-30 | **VM tested**: `vm-svc-5d704922-1` | **Result: 8/8 PASS**
+
+| Check | Values | Result |
+|-------|--------|--------|
+| File-writer continuity | pre=37, post=79, diff=+42 | PASS |
+| SQLite continuity | pre=18, post=40, diff=+22 | PASS |
+| Cron continuity | pre=0, post=1, diff=+1 | PASS |
+| Services still writing | FW: 428→433 (+5 in 5s), SQ: 214→216 (+2 in 5s) | PASS |
+| PID preservation | file_writer=same, sqlite=same, http=same (3/3) | PASS |
+| SQLite integrity | `ok` | PASS |
+| Migration type | `"live (memory preserved, 3/3 PIDs same)"` | PASS |
+| SQLite gaps | No gaps > 4s found | PASS |
+
+**Key finding**: Zero data loss. All 3 PIDs preserved (true live migration). Services auto-resumed writing on target without intervention. No timestamp gaps > 4s — migration pause was minimal.

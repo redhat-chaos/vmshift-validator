@@ -75,10 +75,27 @@ KUBECONFIG=$TARGET_KUBECONFIG kubectl get vm -n vm-services -o jsonpath='{range 
 ```
 
 ### Pass/Fail checklist
-- [ ] 0 VMs on source with matching labels
-- [ ] 0 DataVolumes on source
-- [ ] 0 cloud-init Secrets on source
-- [ ] 0 migrated VMs on target
-- [ ] 0 Plan CRs in MTV namespace
-- [ ] 0 Migration CRs in MTV namespace
-- [ ] No resources stuck in Terminating state
+- [x] 0 VMs on source with matching labels
+- [x] 0 DataVolumes on source
+- [x] 0 cloud-init Secrets on source
+- [x] 0 migrated VMs on target
+- [x] 0 Plan CRs in MTV namespace
+- [x] 0 Migration CRs in MTV namespace
+- [x] No resources stuck in Terminating state
+
+## Test Execution Results
+
+**Date**: 2026-06-30 | **Result: 7/7 PASS**
+
+Teardown actions:
+- `make clean-migrations` deleted 2 Migration CRs + 2 Plan CRs from `openshift-mtv`
+- `make density-teardown` deleted 10 VMs + 8 VMIs on source, 2 VMs + 2 VMIs on target, ran `kube-burner destroy`
+
+| Resource | Source (blue) | Target (green) | Result |
+|----------|--------------|----------------|--------|
+| VMs | 0 | 0 | PASS |
+| DataVolumes | 0 | — | PASS |
+| cloud-init Secrets | 0 | — | PASS |
+| Forklift Plans | — | 0 | PASS |
+| Forklift Migrations | — | 0 | PASS |
+| Stuck Terminating | none | none | PASS |

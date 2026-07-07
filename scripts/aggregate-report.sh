@@ -6,6 +6,7 @@ source "${SCRIPT_DIR}/lib/log.sh"
 
 REPORT_DIR=""
 RUN_ID=""
+RUN_TAG=""
 SELECTION_METHOD="explicit"
 TOTAL_DENSITY=0
 MIGRATED=0
@@ -22,6 +23,7 @@ while [[ $# -gt 0 ]]; do
     --selection-method)  SELECTION_METHOD="$2"; shift 2 ;;
     --total-density)     TOTAL_DENSITY="$2"; shift 2 ;;
     --migrated)          MIGRATED="$2"; shift 2 ;;
+    --run-tag)           RUN_TAG="$2"; shift 2 ;;
     -h|--help)           usage ;;
     *)                   echo "Unknown option: $1"; usage ;;
   esac
@@ -44,6 +46,8 @@ for vm_dir in "${REPORT_DIR}"/*/; do
 
   verdict="UNKNOWN"
   duration=0
+  forklift_duration=0
+  transfer_stats="{}"
   failed_checks="[]"
 
   verdict_file=$(ls -t "${vm_dir}/post-migration-${vm}-"*.json.verdict 2>/dev/null | head -1)
@@ -64,6 +68,24 @@ print('PASS' if ok else 'FAIL')
 
   if [[ -f "${vm_dir}/migration-metrics-${vm}.json" ]]; then
     duration=$(jq -r '.migration.duration_sec // 0' "${vm_dir}/migration-metrics-${vm}.json" 2>/dev/null || echo 0)
+    forklift_duration=$(jq -r '.migration.forklift_duration_sec // 0' "${vm_dir}/migration-metrics-${vm}.json" 2>/dev/null || echo 0)
+  fi
+
+  post_file=$(ls -t "${vm_dir}/post-migration-${vm}-"*.json 2>/dev/null | head -1)
+  if [[ -n "$post_file" && -f "$post_file" ]]; then
+    transfer_stats=$(jq -c '
+      .migration_transfer_stats // {} |
+      if . == {} then {}
+      else {
+        data_processed: (if .data_processed.value then "\(.data_processed.value) \(.data_processed.unit)" else null end),
+        memory_bandwidth: (if .memory_bandwidth.value then "\(.memory_bandwidth.value) \(.memory_bandwidth.unit)" else null end),
+        total_downtime_ms: (if .total_downtime.value then .total_downtime.value else null end),
+        iterations: (if .iteration then .iteration else null end),
+        constant_pages: (if .constant_pages then .constant_pages else null end),
+        normal_pages: (if .normal_pages then .normal_pages else null end)
+      } | with_entries(select(.value != null))
+      end
+    ' "$post_file" 2>/dev/null || echo '{}')
   fi
 
   if [[ "$verdict" == "PASS" ]]; then
@@ -76,8 +98,10 @@ print('PASS' if ok else 'FAIL')
     --arg vm "$vm" \
     --arg verdict "$verdict" \
     --argjson duration "${duration:-0}" \
+    --argjson forklift_dur "${forklift_duration:-0}" \
+    --argjson transfer "$transfer_stats" \
     --argjson failed_checks "$failed_checks" \
-    '{vm: $vm, verdict: $verdict, migration_duration_sec: $duration, failed_checks: $failed_checks}')
+    '{vm: $vm, verdict: $verdict, migration_duration_sec: $duration, forklift_duration_sec: $forklift_dur, failed_checks: $failed_checks} + (if $transfer != {} then {transfer_stats: $transfer} else {} end)')
 
   RESULTS_JSON=$(echo "$RESULTS_JSON" | jq --argjson entry "$entry" '. + [$entry]')
 done
@@ -87,6 +111,7 @@ OVERALL="PASS"
 
 jq -n \
   --arg run_id "$RUN_ID" \
+  --arg run_tag "$RUN_TAG" \
   --argjson total_density "$TOTAL_DENSITY" \
   --argjson migrated_vms "$MIGRATED" \
   --arg selection_method "$SELECTION_METHOD" \
@@ -103,7 +128,7 @@ jq -n \
     overall: $overall,
     passed: $passed,
     failed: $failed
-  }' > "$SUMMARY_FILE"
+  } + (if $run_tag != "" then {run_tag: $run_tag} else {} end)' > "$SUMMARY_FILE"
 
 log.banner "Migration Summary"
 log.info "  Run ID:   ${RUN_ID}"
@@ -112,8 +137,8 @@ log.info "  Passed:   ${PASSED}"
 log.info "  Failed:   ${FAILED}"
 log.info "  Summary:  ${SUMMARY_FILE}"
 echo ""
-printf "%-35s %-10s %-12s\n" "VM" "VERDICT" "DURATION(s)"
-printf "%-35s %-10s %-12s\n" "--" "-------" "-----------"
-echo "$RESULTS_JSON" | jq -r '.[] | "\(.vm)\t\(.verdict)\t\(.migration_duration_sec)"' | while IFS=$'\t' read -r vm verdict dur; do
-  printf "%-35s %-10s %-12s\n" "$vm" "$verdict" "$dur"
+printf "%-35s %-10s %-12s %-14s\n" "VM" "VERDICT" "TOTAL(s)" "MIGRATION(s)"
+printf "%-35s %-10s %-12s %-14s\n" "--" "-------" "--------" "------------"
+echo "$RESULTS_JSON" | jq -r '.[] | "\(.vm)\t\(.verdict)\t\(.migration_duration_sec)\t\(.forklift_duration_sec)"' | while IFS=$'\t' read -r vm verdict dur fk_dur; do
+  printf "%-35s %-10s %-12s %-14s\n" "$vm" "$verdict" "$dur" "$fk_dur"
 done

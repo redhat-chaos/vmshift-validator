@@ -109,12 +109,36 @@ kubectl get vm $VM -n vm-services -o jsonpath='{.metadata.labels}' | jq .
 ```
 
 ### Pass/Fail checklist
-- [ ] `/data` mounted on `/dev/vdc` as `xfs`
-- [ ] All 6 services `active` with PID > 0
-- [ ] `/data/test/log.txt` has lines matching expected format
-- [ ] SQLite `test` table has correct schema, rows > 0, integrity = ok
-- [ ] HTTP returns 200
-- [ ] Cron entry exists in `/etc/cron.d/test-cron`
-- [ ] Ephemeral log.txt and test.db have data
-- [ ] authorized_keys contains the public key
-- [ ] All 4 required labels present on VM resource
+- [x] `/data` mounted on `/dev/vdc` as `xfs`
+- [x] All 6 services `active` with PID > 0
+- [x] `/data/test/log.txt` has lines matching expected format
+- [x] SQLite `test` table has correct schema, rows > 0, integrity = ok
+- [x] HTTP returns 200
+- [x] Cron entry exists in `/etc/cron.d/test-cron`
+- [x] Ephemeral log.txt and test.db have data
+- [x] authorized_keys contains the public key
+- [x] All 4 required labels present on VM resource
+
+## Test Execution Results
+
+**Date**: 2026-06-30 | **VMs tested**: `vm-svc-5d704922-3`, `vm-svc-5d704922-4` | **Result: 16/16 PASS**
+
+| Check | vm-svc-5d704922-3 | vm-svc-5d704922-4 |
+|-------|-------------------|-------------------|
+| `/data` on `/dev/vdc` xfs | PASS | PASS |
+| file-writer active (PID) | PASS (2081) | PASS (2111) |
+| sqlite-writer active (PID) | PASS (1403) | PASS (1377) |
+| http-server active (PID) | PASS (2081) | PASS (2111) |
+| crond active (PID) | PASS (1459) | PASS (1432) |
+| file-writer-ephemeral active | PASS (2081) | PASS (2111) |
+| sqlite-writer-ephemeral active | PASS (1571) | PASS (1571) |
+| log.txt lines + format | PASS (109 lines) | PASS (115 lines) |
+| SQLite schema correct | PASS | PASS |
+| SQLite rows > 0 | PASS (54) | PASS (57) |
+| SQLite integrity | PASS (ok) | PASS (ok) |
+| HTTP returns 200 | PASS | PASS |
+| Cron entry exists | PASS | PASS |
+| Ephemeral log.txt | PASS (107 lines) | PASS (114 lines) |
+| Ephemeral test.db | PASS (54 rows) | PASS (57 rows) |
+| authorized_keys | PASS (1 entry) | PASS (1 entry) |
+| Labels correct | PASS (all 4) | PASS (all 4) |

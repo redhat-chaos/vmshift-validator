@@ -19,6 +19,7 @@ stringData:
       - sqlite
       - python3
       - cronie
+      - stress-ng
     mounts:
       - [/dev/vdc, /data, auto, "defaults,nofail", "0", "2"]
     write_files:
@@ -26,16 +27,29 @@ stringData:
         permissions: '0755'
         content: |
           #!/usr/bin/env python3
-          import time, datetime, os, mmap
+          import time, datetime, os, threading
 
           LOG_PATH = "/data/test/log.txt"
-          RING_SIZE = 1000
+          RING_SIZE = 4000
           LINE_SIZE = 65536
 
           os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
 
           padding = "X" * (LINE_SIZE - 60)
           ring = [bytearray(LINE_SIZE) for _ in range(RING_SIZE)]
+          pat = bytearray(range(256)) * 2
+
+          def dirty_loop():
+              idx = 0
+              while True:
+                  for j in range(64):
+                      ring[(idx + j) % RING_SIZE][:512] = pat
+                  idx += 64
+                  if idx % 4096 == 0:
+                      time.sleep(0.001)
+
+          t = threading.Thread(target=dirty_loop, daemon=True)
+          t.start()
 
           idx = 0
           with open(LOG_PATH, "a", buffering=LINE_SIZE) as f:
@@ -63,16 +77,29 @@ stringData:
         permissions: '0755'
         content: |
           #!/usr/bin/env python3
-          import time, datetime, os
+          import time, datetime, os, threading
 
           LOG_PATH = "/var/lib/test-ephemeral/log.txt"
-          RING_SIZE = 500
+          RING_SIZE = 2000
           LINE_SIZE = 65536
 
           os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
 
           padding = "X" * (LINE_SIZE - 70)
           ring = [bytearray(LINE_SIZE) for _ in range(RING_SIZE)]
+          pat = bytearray(range(256)) * 2
+
+          def dirty_loop():
+              idx = 0
+              while True:
+                  for j in range(64):
+                      ring[(idx + j) % RING_SIZE][:512] = pat
+                  idx += 64
+                  if idx % 4096 == 0:
+                      time.sleep(0.001)
+
+          t = threading.Thread(target=dirty_loop, daemon=True)
+          t.start()
 
           idx = 0
           with open(LOG_PATH, "a", buffering=LINE_SIZE) as f:
@@ -102,19 +129,21 @@ stringData:
           #!/usr/bin/env python3
           import http.server, threading, time, os
 
-          DATASET_SIZE = 2048
+          DATASET_SIZE = 8192
           ENTRY_SIZE = 65536
           SERVE_DIR = "/data"
 
-          dataset = [bytearray(os.urandom(ENTRY_SIZE)) for _ in range(DATASET_SIZE)]
+          dataset = [bytearray(ENTRY_SIZE) for _ in range(DATASET_SIZE)]
+          pat = bytearray(range(256)) * 2
 
           def dirty_loop():
               idx = 0
               while True:
-                  dataset[idx % DATASET_SIZE][:64] = os.urandom(64)
-                  idx += 1
-                  if idx % 100 == 0:
-                      time.sleep(0.01)
+                  for j in range(64):
+                      dataset[(idx + j) % DATASET_SIZE][:512] = pat
+                  idx += 64
+                  if idx % 4096 == 0:
+                      time.sleep(0.001)
 
           t = threading.Thread(target=dirty_loop, daemon=True)
           t.start()
@@ -146,7 +175,7 @@ stringData:
 
           conn = sqlite3.connect('$DB')
           conn.execute('PRAGMA journal_mode=WAL')
-          conn.execute('PRAGMA cache_size=-131072')
+          conn.execute('PRAGMA cache_size=-262144')
           conn.execute('PRAGMA wal_autocheckpoint=10000')
           conn.execute('CREATE TABLE IF NOT EXISTS test (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp INTEGER NOT NULL, written_at TEXT NOT NULL, data BLOB)')
           conn.commit()
@@ -189,7 +218,7 @@ stringData:
 
           conn = sqlite3.connect('$DB')
           conn.execute('PRAGMA journal_mode=WAL')
-          conn.execute('PRAGMA cache_size=-49152')
+          conn.execute('PRAGMA cache_size=-131072')
           conn.execute('PRAGMA wal_autocheckpoint=10000')
           conn.execute('CREATE TABLE IF NOT EXISTS test (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp INTEGER NOT NULL, written_at TEXT NOT NULL, data BLOB)')
           conn.commit()
@@ -217,6 +246,18 @@ stringData:
           RestartSec=3
           [Install]
           WantedBy=multi-user.target
+      - path: /etc/systemd/system/mem-pressure.service
+        content: |
+          [Unit]
+          Description=Memory pressure for extended VMIM Synchronization
+          After=local-fs.target
+          [Service]
+          Type=simple
+          ExecStart=/usr/bin/stress-ng --vm 3 --vm-bytes 512M --vm-keep
+          Restart=always
+          RestartSec=3
+          [Install]
+          WantedBy=multi-user.target
     runcmd:
       - mkdir -p /data
       - |
@@ -233,6 +274,7 @@ stringData:
       - systemctl enable --now crond
       - systemctl enable --now file-writer-ephemeral.service
       - systemctl enable --now sqlite-writer-ephemeral.service
+      - systemctl enable --now mem-pressure.service
 ---
 apiVersion: kubevirt.io/v1
 kind: VirtualMachine

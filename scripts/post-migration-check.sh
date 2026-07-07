@@ -105,6 +105,10 @@ CROND_STATUS_CHECK="PASS"
 SERVICES_RUNNING_STATUS="PASS"
 OVERALL="PASS"
 
+# Migration transfer stats (virsh domjobinfo)
+MIGRATION_TRANSFER_STATS="{}"
+VIRT_LAUNCHER_POD=""
+
 usage() {
   echo "Usage: $0 --kubeconfig <path> --vm <name> [--namespace <ns>] [--ssh-key <path>] [--ssh-user <user>] [--output-dir <dir>] [--pre-migration-file <path>] [--local-ssh-opts <opts>] [--ssh-ready-timeout SEC]"
   exit 1
@@ -170,6 +174,66 @@ collect_cluster_info() {
   VM_NODE=$(kubectl_target get vmi "$VM_NAME" -n "$NAMESPACE" -o jsonpath='{.status.nodeName}' 2>/dev/null || echo "unknown")
   VM_IP=$(kubectl_target get vmi "$VM_NAME" -n "$NAMESPACE" -o jsonpath='{.status.interfaces[0].ipAddress}' 2>/dev/null || echo "unknown")
   task.pass "Cluster info collected"
+}
+
+collect_migration_transfer_stats() {
+  task.begin "Collecting migration transfer stats (virsh domjobinfo)"
+
+  VIRT_LAUNCHER_POD=$(kubectl_target get pods -n "$NAMESPACE" \
+    -l "vm.kubevirt.io/name=${VM_NAME}" \
+    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+
+  if [[ -z "$VIRT_LAUNCHER_POD" ]]; then
+    log.verbose "No virt-launcher pod found for $VM_NAME — skipping transfer stats"
+    MIGRATION_TRANSFER_STATS="{}"
+    task.pass "Skipped (no pod)"
+    return
+  fi
+
+  local raw_domjobinfo
+  raw_domjobinfo=$(kubectl_target exec "$VIRT_LAUNCHER_POD" \
+    -n "$NAMESPACE" -c compute -- virsh domjobinfo 1 --completed 2>/dev/null || true)
+
+  if [[ -z "$raw_domjobinfo" ]] || echo "$raw_domjobinfo" | grep -q "Job type:.*None"; then
+    log.verbose "No completed migration data in virt-launcher pod"
+    MIGRATION_TRANSFER_STATS="{}"
+    task.pass "Skipped (no data)"
+    return
+  fi
+
+  MIGRATION_TRANSFER_STATS=$(echo "$raw_domjobinfo" | python3 -c '
+import sys, json, re
+
+stats = {}
+for line in sys.stdin:
+    line = line.strip()
+    if not line or ":" not in line:
+        continue
+    key, _, rest = line.partition(":")
+    key = key.strip()
+    rest = rest.strip()
+    parts = rest.split()
+    if not parts:
+        continue
+    val_str = parts[0]
+    unit = parts[1] if len(parts) > 1 else ""
+    try:
+        val = int(val_str)
+    except ValueError:
+        try:
+            val = float(val_str)
+        except ValueError:
+            val = val_str
+    norm_key = re.sub(r"[^a-zA-Z0-9]+", "_", key).strip("_").lower()
+    if unit:
+        stats[norm_key] = {"value": val, "unit": unit}
+    else:
+        stats[norm_key] = val
+
+json.dump(stats, sys.stdout)
+' 2>/dev/null || echo '{}')
+
+  task.pass "Transfer stats collected"
 }
 
 emit_partial_report_and_exit() {
@@ -600,6 +664,7 @@ build_report_json() {
     --argjson pre_eph_large_size "$PRE_EPHEMERAL_LARGE_FILE_SIZE" \
     --argjson post_eph_large_size "$POST_EPHEMERAL_LARGE_FILE_SIZE" \
     --argjson eph_large_sha_match "$eph_large_intact_json" \
+    --argjson migration_transfer_stats "$MIGRATION_TRANSFER_STATS" \
     --argjson persistent_data_intact "$(bool_json "$([ "$FILE_WRITER_DIFF" -ge 0 ] && [ "$SQLITE_DIFF" -ge 0 ] && [ "$CRON_DIFF" -ge 0 ] && [ "$(get_val SQLITE_INTEGRITY)" == "ok" ] && echo true || echo false)")" \
     --argjson ephemeral_data_intact "$(bool_json "$([ "$EPHEMERAL_FILE_WRITER_DIFF" -ge 0 ] && [ "$EPHEMERAL_SQLITE_DIFF" -ge 0 ] && [ "$(get_val EPHEMERAL_SQLITE_INTEGRITY)" == "ok" ] && echo true || echo false)")" \
     --argjson all_processes_running "$(bool_json "$([ "$(get_val FILE_WRITER_PID)" != "none" ] && [ "$(get_val SQLITE_PID)" != "none" ] && [ "$(get_val HTTP_PID)" != "none" ] && [ "$(get_val EPHEMERAL_FILE_WRITER_PID)" != "none" ] && [ "$(get_val EPHEMERAL_SQLITE_PID)" != "none" ] && echo true || echo false)")" \
@@ -756,6 +821,7 @@ build_report_json() {
           post_size_bytes: $post_eph_large_size
         }
       },
+      migration_transfer_stats: $migration_transfer_stats,
       verdict: {
         persistent_data_intact: $persistent_data_intact,
         ephemeral_data_intact: $ephemeral_data_intact,
@@ -815,6 +881,61 @@ print_gap_summary() {
     echo "    Post-migration SHA256: ${POST_EPHEMERAL_LARGE_FILE_SHA256}"
     echo "    Match:                 $([ "$EPHEMERAL_DATA_INTACT" == "true" ] && echo 'YES (PASS)' || echo 'NO (FAIL)')"
     echo "    File size:             ${POST_EPHEMERAL_LARGE_FILE_SIZE} bytes ($(( POST_EPHEMERAL_LARGE_FILE_SIZE / 1024 / 1024 ))MB)"
+  fi
+  echo ""
+
+  echo "--- Migration Transfer Statistics (virsh domjobinfo) ---"
+  echo ""
+  if [[ "$MIGRATION_TRANSFER_STATS" == "{}" ]]; then
+    echo "  No transfer stats available (virt-launcher pod data expired or not found)"
+  else
+    echo "$MIGRATION_TRANSFER_STATS" | python3 -c '
+import sys, json
+
+def fmt_val(entry):
+    if isinstance(entry, dict):
+        v, u = entry.get("value", "?"), entry.get("unit", "")
+        if isinstance(v, float):
+            return f"{v:.3f} {u}".strip()
+        return f"{v:,} {u}".strip() if isinstance(v, int) else f"{v} {u}".strip()
+    if isinstance(entry, int):
+        return f"{entry:,}"
+    return str(entry)
+
+try:
+    s = json.load(sys.stdin)
+    fields = [
+        ("data_processed", "Data processed"),
+        ("data_remaining", "Data remaining"),
+        ("data_total", "Data total"),
+        ("memory_processed", "Memory processed"),
+        ("memory_remaining", "Memory remaining"),
+        ("memory_total", "Memory total"),
+        ("memory_bandwidth", "Memory bandwidth"),
+        ("dirty_rate", "Dirty rate"),
+        ("iteration", "Iterations"),
+        ("constant_pages", "Constant pages"),
+        ("normal_pages", "Normal pages"),
+        ("normal_data", "Normal data"),
+        ("expected_downtime", "Expected downtime"),
+        ("total_downtime", "Total downtime"),
+        ("setup_time", "Setup time"),
+        ("time_elapsed", "Time elapsed"),
+        ("time_elapsed_net", "Time elapsed (net)"),
+        ("postcopy_requests", "Postcopy requests"),
+        ("page_size", "Page size"),
+    ]
+    printed = False
+    for key, label in fields:
+        if key in s:
+            print("  %-23s %s" % (label + ":", fmt_val(s[key])))
+            printed = True
+    if not printed:
+        for key, val in s.items():
+            print("  %-23s %s" % (key + ":", fmt_val(val)))
+except Exception as e:
+    print(f"  Error parsing transfer stats: {e}")
+' 2>/dev/null
   fi
   echo ""
 
@@ -1172,6 +1293,7 @@ log.verbose "Post-Migration Check: ${VM_NAME} (${TIMESTAMP})"
 # ── Main pipeline ─────────────────────────────────────────────
 parse_pre_migration_sizes
 collect_cluster_info
+collect_migration_transfer_stats
 if ! wait_for_guest_ssh; then
   emit_partial_report_and_exit
 fi

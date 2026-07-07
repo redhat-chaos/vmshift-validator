@@ -163,6 +163,16 @@ MIGRATION_MAX_ATTEMPTS ?= 60
 # reach Completed or Failed phase.
 MIGRATION_POLL_INTERVAL ?= 10
 
+# Seconds to sleep before applying Forklift migration CRs. Use with chaos
+# testing to give krknctl time to start before migration begins.
+# Example: make migrate-selective VMS=vm-0 PRE_MIGRATE_DELAY=10
+PRE_MIGRATE_DELAY ?=
+
+# Human-readable tag prepended to the report run directory name.
+# Example: make migrate-selective VMS=vm-0 RUN_TAG=A1-iteration1
+#   creates reports/run-A1-iteration1-20260702T120400Z/
+RUN_TAG ?=
+
 # ── Required CLI tools ──────────────────────────────────────────
 
 # List of CLI binaries required on the host. Checked by the check-prereqs
@@ -181,7 +191,9 @@ MIGRATION_ARGS := \
 	--migration-profile $(MIGRATION_PROFILE) \
 	--post-ssh-timeout $(POST_SSH_READY_TIMEOUT) \
 	--max-attempts $(MIGRATION_MAX_ATTEMPTS) \
-	--poll-interval $(MIGRATION_POLL_INTERVAL)
+	--poll-interval $(MIGRATION_POLL_INTERVAL) \
+	$(if $(PRE_MIGRATE_DELAY),--pre-migrate-delay $(PRE_MIGRATE_DELAY),) \
+	$(if $(RUN_TAG),--run-tag $(RUN_TAG),)
 
 .PHONY: help \
 	init-config \
@@ -189,7 +201,7 @@ MIGRATION_ARGS := \
 	generate-keys setup-kubeconfigs render-config \
 	density-setup density-status density-teardown \
 	discover-vms migrate-selective migrate-dry-run \
-	report list-reports logs \
+	report list-reports fetch-reports logs \
 	reauth-blue \
 	ssh status \
 	clean-migrations clean-generated clean-reports clean-logs clean-all \
@@ -230,6 +242,8 @@ help: ## Show help
 	@echo "Reports & Logs:"
 	@echo "  make report                     Show latest summary"
 	@echo "  make list-reports               List report runs"
+	@echo "  make fetch-reports              Fetch reports from bastion"
+	@echo "  make fetch-reports RUN_ID=...   Fetch a specific run"
 	@echo "  make logs                       Show latest kube-burner log"
 	@echo ""
 	@echo "Auth:"
@@ -253,6 +267,7 @@ help: ## Show help
 	@echo "              NETWORK_MAP_NAME  STORAGE_MAP_NAME"
 	@echo "  Tuning:     LOG_LEVEL  STABILIZE_WAIT  SSH_READY_TIMEOUT  POST_SSH_READY_TIMEOUT"
 	@echo "              MIGRATION_MAX_ATTEMPTS  MIGRATION_POLL_INTERVAL"
+	@echo "  Tags:       RUN_TAG  RUN_ID"
 	@echo "  Selectors:  VMS  N  SELECTOR  KUBE_BURNER_CONFIG"
 	@echo ""
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -465,6 +480,10 @@ list-reports: ## List all report runs
 logs: ## Show latest kube-burner log
 	@LATEST=$$(ls -t $(KUBE_BURNER_DIR)/kube-burner-*.log 2>/dev/null | head -1); \
 	if [[ -n "$$LATEST" ]]; then cat "$$LATEST"; else echo "No kube-burner logs found."; fi
+
+fetch-reports: ## Fetch reports from bastion to local reports/
+	@$(SCRIPTS_DIR)/fetch-reports.sh --profile $(MIGRATION_PROFILE) \
+		$(if $(RUN_ID),--run-id $(RUN_ID),)
 
 # ═══════════════════════════════════════════════════════════════
 #  Interactive

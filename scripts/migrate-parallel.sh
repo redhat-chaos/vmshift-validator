@@ -27,6 +27,8 @@ POST_SSH_READY_TIMEOUT="${POST_SSH_READY_TIMEOUT:-225}"
 MIGRATION_PROFILE="${MIGRATION_PROFILE:-gcp}"
 MIGRATION_MAX_ATTEMPTS="${MIGRATION_MAX_ATTEMPTS:-60}"
 MIGRATION_POLL_INTERVAL="${MIGRATION_POLL_INTERVAL:-10}"
+PRE_MIGRATE_DELAY=""
+RUN_TAG=""
 PROVIDER_SOURCE="${PROVIDER_SOURCE_NAME:-host}"
 PROVIDER_DEST="${PROVIDER_DEST_NAME:-green-cluster}"
 NETWORK_MAP="${NETWORK_MAP_NAME:-blue-green-network-map}"
@@ -81,6 +83,8 @@ while [[ $# -gt 0 ]]; do
     --post-ssh-timeout)  POST_SSH_READY_TIMEOUT="$2"; shift 2 ;;
     --max-attempts)      MIGRATION_MAX_ATTEMPTS="$2"; shift 2 ;;
     --poll-interval)     MIGRATION_POLL_INTERVAL="$2"; shift 2 ;;
+    --pre-migrate-delay) PRE_MIGRATE_DELAY="$2"; shift 2 ;;
+    --run-tag)           RUN_TAG="$2"; shift 2 ;;
     -h|--help)           usage ;;
     *)                   echo "Unknown option: $1"; usage ;;
   esac
@@ -90,7 +94,11 @@ done
 [[ -z "$TARGET_KUBECONFIG" ]] && { echo "ERROR: --target-kubeconfig is required"; usage; }
 
 RUN_TIMESTAMP=$(date -u +%Y%m%dT%H%M%SZ)
-REPORT_DIR="${REPORT_DIR:-${PROJECT_DIR}/reports/run-${RUN_TIMESTAMP}}"
+if [[ -n "$RUN_TAG" ]]; then
+  REPORT_DIR="${REPORT_DIR:-${PROJECT_DIR}/reports/run-${RUN_TAG}-${RUN_TIMESTAMP}}"
+else
+  REPORT_DIR="${REPORT_DIR:-${PROJECT_DIR}/reports/run-${RUN_TIMESTAMP}}"
+fi
 mkdir -p "$REPORT_DIR"
 
 SELECT_ARGS=(--kubeconfig "$SOURCE_KUBECONFIG" --namespace "$NAMESPACE" --base-selector "$VM_LABEL_SELECTOR")
@@ -153,7 +161,8 @@ for vm in "${VM_LIST[@]}"; do
       --migration-profile "$MIGRATION_PROFILE" \
       --post-ssh-timeout "$POST_SSH_READY_TIMEOUT" \
       --max-attempts "$MIGRATION_MAX_ATTEMPTS" \
-      --poll-interval "$MIGRATION_POLL_INTERVAL"
+      --poll-interval "$MIGRATION_POLL_INTERVAL" \
+      ${PRE_MIGRATE_DELAY:+--pre-migrate-delay "$PRE_MIGRATE_DELAY"}
   ) > "${REPORT_DIR}/${vm}/run.log" 2>&1 &
   VMS_ORDER+=("$vm")
   PIDS+=($!)
@@ -179,7 +188,8 @@ done
   --run-id "$RUN_TIMESTAMP" \
   --selection-method "$SELECTION_METHOD" \
   --total-density "$TOTAL_DENSITY" \
-  --migrated "${#VM_LIST[@]}"
+  --migrated "${#VM_LIST[@]}" \
+  ${RUN_TAG:+--run-tag "$RUN_TAG"}
 
 if [[ "$FAILED" -gt 0 ]]; then
   exit 1

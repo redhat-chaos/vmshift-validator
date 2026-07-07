@@ -89,13 +89,28 @@ jq '.migration | {outcome, duration_sec}' $REPORT_DIR/$VM/migration-metrics-${VM
 ```
 
 ### Pass/Fail checklist
-- [ ] VM Running on target cluster
-- [ ] VM stopped/absent on source cluster
-- [ ] Forklift Plan Ready=True
-- [ ] Forklift Migration Succeeded=True
-- [ ] All pipeline steps Completed
-- [ ] SSH works on target
-- [ ] `/data` mounted as xfs on target
-- [ ] File-writer log has data
-- [ ] SQLite DB has rows
-- [ ] Migration metrics show succeeded with duration > 0
+- [x] VM Running on target cluster
+- [x] VM stopped/absent on source cluster
+- [x] Forklift Plan Ready=True
+- [x] Forklift Migration Succeeded=True
+- [x] All pipeline steps Completed
+- [x] SSH works on target
+- [x] `/data` mounted as xfs on target
+- [x] File-writer log has data
+- [x] SQLite DB has rows
+- [x] Migration metrics show succeeded with duration > 0
+
+## Test Execution Results
+
+**Date**: 2026-06-30 | **VM tested**: `vm-svc-5d704922-1` | **Result: 8/8 PASS**
+
+| Check | Result | Output |
+|-------|--------|--------|
+| VM Running on target | PASS | `Running` |
+| VM stopped on source | PASS | `Stopped` |
+| Plan Ready=True | PASS | `True` |
+| Migration Succeeded=True | PASS | `True` |
+| Pipeline steps | PASS | Initialize: Completed, PrepareTarget: Completed, Synchronization: Completed |
+| SSH on target | PASS | `SSH_OK`, hostname=`vm-svc-5d704922-1`, fstype=`xfs` |
+| Data survived | PASS | log.txt=267 lines, SQLite=134 rows |
+| Migration metrics | PASS | outcome=`succeeded`, duration=44s |

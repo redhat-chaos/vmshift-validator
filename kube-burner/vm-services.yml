@@ -20,9 +20,9 @@ jobs:
     cleanup: true
     objects:
 
-    # 5 small Fedora VMs spread by scheduler
+    # 250 small Fedora VMs spread by scheduler
     - objectTemplate: templates/vm-services.yml
-      replicas: 10
+      replicas: 250
       inputVars:
         name: vm-svc
         image: REPLACE_CONTAINER_IMAGE

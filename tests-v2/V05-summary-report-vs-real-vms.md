@@ -85,11 +85,24 @@ KUBECONFIG=$TARGET_KUBECONFIG kubectl get vm -n vm-services -l workload-type=ser
 ```
 
 ### Pass/Fail checklist
-- [ ] `passed + failed` = `results` array length
-- [ ] `vms_selected_for_migration` matches actual count
-- [ ] Every PASS VM has all services running, HTTP=200, integrity=ok
-- [ ] Every FAIL VM has a real problem (not a false positive)
-- [ ] `migration_duration_sec` > 0 and < 600 for each VM
-- [ ] `overall` is PASS only when all VMs passed
-- [ ] Every VM in results exists on target cluster
-- [ ] No extra VMs in report that weren't migrated
+- [x] `passed + failed` = `results` array length
+- [x] `vms_selected_for_migration` matches actual count
+- [x] Every PASS VM has all services running, HTTP=200, integrity=ok
+- [ ] Every FAIL VM has a real problem (not a false positive) *(N/A — no FAIL VMs in this run)*
+- [x] `migration_duration_sec` > 0 and < 600 for each VM
+- [x] `overall` is PASS only when all VMs passed
+- [x] Every VM in results exists on target cluster
+- [x] No extra VMs in report that weren't migrated
+
+## Test Execution Results
+
+**Date**: 2026-06-30 | **Report**: `run-20260629T214645Z` | **Result: 7/7 PASS**
+
+**Summary.json values**: `overall=PASS`, `passed=2`, `failed=0`, `vms_selected=2`
+
+| VM | Report Verdict | Duration | Target Status | Services | HTTP | Integrity |
+|----|---------------|----------|---------------|----------|------|-----------|
+| vm-svc-5d704922-1 | PASS | 44s | Running | all active | 200 | ok |
+| vm-svc-5d704922-2 | PASS | 44s | Running | all active | 200 | ok |
+
+Both VMs independently confirmed healthy on target. Report accurately reflects reality.

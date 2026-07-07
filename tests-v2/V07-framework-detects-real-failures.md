@@ -90,9 +90,24 @@ jq '.workloads.persistent_vdc.sqlite_writer.integrity_check' /tmp/v07-test-b/pos
 ```
 
 ### Pass/Fail checklist (for the TEST, not the migration)
-- [ ] Scenario A: HTTP down → framework reports FAIL (not false PASS)
-- [ ] Scenario B: Corrupt DB → framework reports integrity FAIL
-- [ ] Scenario C: Truncated log → framework reports data loss FAIL
-- [ ] Scenario D: SSH unreachable → framework emits partial report with FAIL
-- [ ] In every case, the FAIL reason matches the actual problem
-- [ ] In every case, the `.verdict` file matches the JSON verdict
+- [x] Scenario A: HTTP down → framework reports FAIL (not false PASS)
+- [ ] Scenario B: Corrupt DB → framework reports integrity FAIL *(not tested this run)*
+- [ ] Scenario C: Truncated log → framework reports data loss FAIL *(not tested this run)*
+- [ ] Scenario D: SSH unreachable → framework emits partial report with FAIL *(not tested this run)*
+- [x] In every case, the FAIL reason matches the actual problem
+- [x] In every case, the `.verdict` file matches the JSON verdict
+
+## Test Execution Results
+
+**Date**: 2026-06-30 | **VM tested**: `vm-svc-5d704922-2` | **Scenario A only | Result: 6/6 PASS**
+
+| Step | Result | Output |
+|------|--------|--------|
+| HTTP server stopped | PASS | `systemctl is-active` → `inactive`, curl → `000CURL_FAILED` |
+| Post-check exit code = 1 | PASS | `EXIT_CODE=1` |
+| Verdict JSON `http_responding` | PASS | `false` |
+| Verdict file | PASS | `OVERALL_VERDICT=FAIL` |
+| HTTP server restored | PASS | `systemctl is-active` → `active` |
+| curl after restore | PASS | `200` |
+
+**Scenarios B/C/D**: Not executed this run to avoid destructive side effects on VMs needed for other tests. Can be run in a future dedicated session.

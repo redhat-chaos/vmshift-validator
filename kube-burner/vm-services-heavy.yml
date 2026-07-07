@@ -30,8 +30,8 @@ jobs:
         password: REPLACE_VM_PASSWORD
         osLabel: fedora
         sizeLabel: small
-        cpuCores: 2
-        memory: 4Gi
+        cpuCores: 4
+        memory: 8Gi
         storageSize: 5Gi
         storageClassName: REPLACE_STORAGE_CLASS
         sshPublicKey: REPLACE_SSH_PUBLIC_KEY

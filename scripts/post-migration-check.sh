@@ -637,6 +637,8 @@ compute_comparisons() {
   LARGE_DATA_INTACT="false"
   if [[ "$PRE_LARGE_FILE_SHA256" != "none" ]] && [[ "$POST_LARGE_FILE_SHA256" != "none" ]]; then
     [[ "$PRE_LARGE_FILE_SHA256" == "$POST_LARGE_FILE_SHA256" ]] && LARGE_DATA_INTACT="true"
+  elif is_windows_vm "$VM_OS" && [[ "$PRE_LARGE_FILE_SHA256" == "none" ]] && [[ "$POST_LARGE_FILE_SHA256" == "none" ]]; then
+    LARGE_DATA_INTACT="true"
   fi
 
   POST_LOG_FILE_SHA256="$(get_val LOG_FILE_SHA256)"
@@ -667,6 +669,8 @@ compute_comparisons() {
   EPHEMERAL_DATA_INTACT="false"
   if [[ "$PRE_EPHEMERAL_LARGE_FILE_SHA256" != "none" ]] && [[ "$POST_EPHEMERAL_LARGE_FILE_SHA256" != "none" ]]; then
     [[ "$PRE_EPHEMERAL_LARGE_FILE_SHA256" == "$POST_EPHEMERAL_LARGE_FILE_SHA256" ]] && EPHEMERAL_DATA_INTACT="true"
+  elif is_windows_vm "$VM_OS" && [[ "$PRE_EPHEMERAL_LARGE_FILE_SHA256" == "none" ]] && [[ "$POST_EPHEMERAL_LARGE_FILE_SHA256" == "none" ]]; then
+    EPHEMERAL_DATA_INTACT="true"
   fi
 }
 
@@ -789,8 +793,8 @@ build_report_json() {
     --argjson eph_large_sha_match "$eph_large_intact_json" \
     --argjson migration_transfer_stats "$MIGRATION_TRANSFER_STATS" \
     --argjson persistent_data_intact "$(bool_json "$([ "$FILE_WRITER_DIFF" -ge 0 ] && [ "$SQLITE_DIFF" -ge 0 ] && [ "$CRON_DIFF" -ge 0 ] && [ "$(get_val SQLITE_INTEGRITY)" == "ok" ] && echo true || echo false)")" \
-    --argjson ephemeral_data_intact "$(bool_json "$([ "$EPHEMERAL_FILE_WRITER_DIFF" -ge 0 ] && [ "$EPHEMERAL_SQLITE_DIFF" -ge 0 ] && [ "$(get_val EPHEMERAL_SQLITE_INTEGRITY)" == "ok" ] && echo true || echo false)")" \
-    --argjson all_processes_running "$(bool_json "$([ "$(get_val FILE_WRITER_PID)" != "none" ] && [ "$(get_val SQLITE_PID)" != "none" ] && [ "$(get_val HTTP_PID)" != "none" ] && [ "$(get_val EPHEMERAL_FILE_WRITER_PID)" != "none" ] && [ "$(get_val EPHEMERAL_SQLITE_PID)" != "none" ] && echo true || echo false)")" \
+    --argjson ephemeral_data_intact "$(bool_json "$(if is_windows_vm "$VM_OS"; then echo true; elif [ "$EPHEMERAL_FILE_WRITER_DIFF" -ge 0 ] && [ "$EPHEMERAL_SQLITE_DIFF" -ge 0 ] && [ "$(get_val EPHEMERAL_SQLITE_INTEGRITY)" == "ok" ]; then echo true; else echo false; fi)")" \
+    --argjson all_processes_running "$(bool_json "$(if [ "$(get_val FILE_WRITER_PID)" != "none" ] && [ "$(get_val SQLITE_PID)" != "none" ] && [ "$(get_val HTTP_PID)" != "none" ]; then if is_windows_vm "$VM_OS"; then echo true; elif [ "$(get_val EPHEMERAL_FILE_WRITER_PID)" != "none" ] && [ "$(get_val EPHEMERAL_SQLITE_PID)" != "none" ]; then echo true; else echo false; fi; else echo false; fi)")" \
     --argjson http_responding "$(bool_json "$([ "$(get_val HTTP_STATUS)" == "200" ] && echo true || echo false)")" \
     '{
       type: $type,

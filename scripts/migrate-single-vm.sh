@@ -32,6 +32,7 @@ MIGRATION_PROFILE="${MIGRATION_PROFILE:-gcp}"
 MIGRATION_MAX_ATTEMPTS="${MIGRATION_MAX_ATTEMPTS:-60}"
 MIGRATION_POLL_INTERVAL="${MIGRATION_POLL_INTERVAL:-10}"
 PRE_MIGRATE_DELAY=""
+SKIP_POST_CHECK="${SKIP_POST_CHECK:-false}"
 PROVIDER_SOURCE="${PROVIDER_SOURCE_NAME:-host}"
 PROVIDER_DEST="${PROVIDER_DEST_NAME:-green-cluster}"
 NETWORK_MAP="${NETWORK_MAP_NAME:-blue-green-network-map}"
@@ -87,6 +88,7 @@ while [[ $# -gt 0 ]]; do
     --max-attempts)      MIGRATION_MAX_ATTEMPTS="$2"; shift 2 ;;
     --poll-interval)     MIGRATION_POLL_INTERVAL="$2"; shift 2 ;;
     --pre-migrate-delay) PRE_MIGRATE_DELAY="$2"; shift 2 ;;
+    --skip-post-check)   SKIP_POST_CHECK=true; shift ;;
     -h|--help)           usage ;;
     *)                   echo "Unknown option: $1"; usage ;;
   esac
@@ -229,7 +231,7 @@ for i in $(seq 1 "$MAX_ATTEMPTS"); do
     MIGRATION_DURATION_SEC="$ELAPSED"
     MIGRATION_OUTCOME="failed"
     MIGRATION_FAILED=true
-    [[ -n "$vm_error" ]] && log_info "Migration error: $vm_error"
+    [[ -n "$vm_error" ]] && log.info "Migration error: $vm_error"
     step.end "FAIL"
     break
   fi
@@ -355,6 +357,12 @@ jq -n \
 if [[ "$MIGRATION_FAILED" == "true" ]]; then
   log.error "Migration failed for ${VM_NAME}"
   exit 1
+fi
+
+if [[ "$SKIP_POST_CHECK" == "true" ]]; then
+  log.info "[4/4] POST-MIGRATION CHECK .............. DEFERRED (--skip-post-check)"
+  log.banner "VM ${VM_NAME}: MIGRATE OK (post-check deferred)"
+  exit 0
 fi
 
 # [4/4] Post-migration check

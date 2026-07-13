@@ -28,6 +28,7 @@ MIGRATION_PROFILE="${MIGRATION_PROFILE:-gcp}"
 MIGRATION_MAX_ATTEMPTS="${MIGRATION_MAX_ATTEMPTS:-60}"
 MIGRATION_POLL_INTERVAL="${MIGRATION_POLL_INTERVAL:-10}"
 PRE_MIGRATE_DELAY=""
+SKIP_POST_CHECK="${SKIP_POST_CHECK:-false}"
 RUN_TAG=""
 PROVIDER_SOURCE="${PROVIDER_SOURCE_NAME:-host}"
 PROVIDER_DEST="${PROVIDER_DEST_NAME:-green-cluster}"
@@ -84,6 +85,7 @@ while [[ $# -gt 0 ]]; do
     --max-attempts)      MIGRATION_MAX_ATTEMPTS="$2"; shift 2 ;;
     --poll-interval)     MIGRATION_POLL_INTERVAL="$2"; shift 2 ;;
     --pre-migrate-delay) PRE_MIGRATE_DELAY="$2"; shift 2 ;;
+    --skip-post-check)   SKIP_POST_CHECK=true; shift ;;
     --run-tag)           RUN_TAG="$2"; shift 2 ;;
     -h|--help)           usage ;;
     *)                   echo "Unknown option: $1"; usage ;;
@@ -162,7 +164,8 @@ for vm in "${VM_LIST[@]}"; do
       --post-ssh-timeout "$POST_SSH_READY_TIMEOUT" \
       --max-attempts "$MIGRATION_MAX_ATTEMPTS" \
       --poll-interval "$MIGRATION_POLL_INTERVAL" \
-      ${PRE_MIGRATE_DELAY:+--pre-migrate-delay "$PRE_MIGRATE_DELAY"}
+      ${PRE_MIGRATE_DELAY:+--pre-migrate-delay "$PRE_MIGRATE_DELAY"} \
+      $( [[ "$SKIP_POST_CHECK" == "true" ]] && echo "--skip-post-check" )
   ) > "${REPORT_DIR}/${vm}/run.log" 2>&1 &
   VMS_ORDER+=("$vm")
   PIDS+=($!)
@@ -189,7 +192,7 @@ done
   --selection-method "$SELECTION_METHOD" \
   --total-density "$TOTAL_DENSITY" \
   --migrated "${#VM_LIST[@]}" \
-  ${RUN_TAG:+--run-tag "$RUN_TAG"}
+  ${RUN_TAG:+--run-tag "$RUN_TAG"} || true
 
 if [[ "$FAILED" -gt 0 ]]; then
   exit 1

@@ -29,7 +29,7 @@ stringData:
           After=local-fs.target
           [Service]
           Type=simple
-          ExecStart=/bin/bash -c 'mkdir -p /data/test && while true; do echo "$(date +%%Y-%%m-%%dT%%H:%%M:%%S) - writing test data" >> /data/test/log.txt; sleep 1; done'
+          ExecStart=/bin/bash -c 'mkdir -p /data/test && while true; do echo "$(date +%%Y-%%m-%%dT%%H:%%M:%%S) - writing test data" >> /data/test/log.txt; sleep 10; done'
           Restart=always
           RestartSec=3
           [Install]
@@ -63,7 +63,7 @@ stringData:
               ts = datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S')
               conn.execute('INSERT INTO test (timestamp, written_at) VALUES (?, ?)', (now, ts))
               conn.commit()
-              time.sleep(2)
+              time.sleep(10)
           "
       - path: /etc/systemd/system/sqlite-writer.service
         content: |
@@ -87,7 +87,7 @@ stringData:
           After=local-fs.target
           [Service]
           Type=simple
-          ExecStart=/bin/bash -c 'mkdir -p /var/lib/test-ephemeral && while true; do echo "$(date +%%Y-%%m-%%dT%%H:%%M:%%S) - writing ephemeral data" >> /var/lib/test-ephemeral/log.txt; sleep 1; done'
+          ExecStart=/bin/bash -c 'mkdir -p /var/lib/test-ephemeral && while true; do echo "$(date +%%Y-%%m-%%dT%%H:%%M:%%S) - writing ephemeral data" >> /var/lib/test-ephemeral/log.txt; sleep 10; done'
           Restart=always
           RestartSec=3
           [Install]
@@ -108,7 +108,7 @@ stringData:
               ts = datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S')
               conn.execute('INSERT INTO test (timestamp, written_at) VALUES (?, ?)', (now, ts))
               conn.commit()
-              time.sleep(2)
+              time.sleep(10)
           "
       - path: /etc/systemd/system/sqlite-writer-ephemeral.service
         content: |

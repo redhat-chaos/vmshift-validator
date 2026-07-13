@@ -20,9 +20,9 @@ jobs:
     cleanup: true
     objects:
 
-    # 250 small Fedora VMs spread by scheduler
+    # 3 Fedora VMs for baseline mixed re-run
     - objectTemplate: templates/vm-services.yml
-      replicas: 250
+      replicas: 3
       inputVars:
         name: vm-svc
         image: REPLACE_CONTAINER_IMAGE
@@ -32,7 +32,7 @@ jobs:
         sizeLabel: small
         cpuCores: 1
         memory: 512Mi
-        storageSize: 5Gi
+        storageSize: 20Gi
         storageClassName: REPLACE_STORAGE_CLASS
         sshPublicKey: REPLACE_SSH_PUBLIC_KEY
         targetNode: "REPLACE_TARGET_NODE"

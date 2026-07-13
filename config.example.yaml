@@ -43,6 +43,13 @@ vm_label_selector: workload-type=services-test
 # Job config filename inside kube-burner/. Use kubevirt-density.yml for multi-OS.
 kube_burner_config: vm-services.yml
 
+# ── Mixed workload settings ─────────────────────────────────────
+# Per-type VM counts. Set any combination to create a mixed workload.
+# When any is set, a merged kube-burner config is generated automatically.
+# fedora_vms: 30
+# fedora_heavy_vms: 5
+# win_vms: 10
+
 # ── Forklift / MTV settings ─────────────────────────────────────
 
 # Namespace where Forklift operator resources live.

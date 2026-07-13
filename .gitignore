@@ -10,6 +10,9 @@ config.yaml
 # Rendered kube-burner configs (generated from templates by make render-config)
 kube-burner/.rendered-*.yml
 
+# Generated mixed-workload config (created by make render-mixed-config)
+kube-burner/vm-mixed.yml
+
 # Logs
 *.log
 

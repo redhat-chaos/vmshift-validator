@@ -170,12 +170,3 @@ vmshift-validator/
 ## License
 
 Apache License 2.0
-
-
-
-YES PLEASE CREATE the skill
-1. yes this is correct
-2. we already of sync.sh file, but it will be good if you sync it before running it
-3. yes autopicku is great.
-
-Only correction I would suggest is , before generating actual valid krknctl command, let env setup is done like vm. so that when you generate the krknctl command we will have actual vm related parameter in command and easy to review and execute.

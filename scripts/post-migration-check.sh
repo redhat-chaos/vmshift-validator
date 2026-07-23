@@ -692,11 +692,20 @@ build_report_json() {
 
 
   # Sanitize all JSON variables for --argjson
-  FILE_WRITER_GAP_DATA=$(echo "$FILE_WRITER_GAP_DATA" | head -1 | jq -c . 2>/dev/null || echo '[]')
-  SQLITE_GAP_DATA=$(echo "$SQLITE_GAP_DATA" | head -1 | jq -c . 2>/dev/null || echo '[]')
-  EPHEMERAL_FILE_WRITER_GAP_DATA=$(echo "$EPHEMERAL_FILE_WRITER_GAP_DATA" | head -1 | jq -c . 2>/dev/null || echo '[]')
-  CRON_GAP_DATA=$(echo "$CRON_GAP_DATA" | head -1 | jq -c . 2>/dev/null || echo '[]')
-  AFFECTED_WINDOWS=$(echo "$AFFECTED_WINDOWS" | head -1 | jq -c . 2>/dev/null || echo '{}')
+  # Large JSON values are written to temp files and loaded via --slurpfile
+  # to avoid "Argument list too long" errors from execve() with ~96 --arg pairs
+  local _jq_tmp
+  _jq_tmp=$(mktemp -d)
+  trap 'rm -rf "$_jq_tmp"' RETURN
+
+  _write_json() { { echo "$1" | head -1 | jq -c .; } > "$3" 2>/dev/null || echo "$2" > "$3"; }
+  _write_json "$FILE_WRITER_GAP_DATA" '[]' "$_jq_tmp/fw_gap.json"
+  _write_json "$SQLITE_GAP_DATA" '[]' "$_jq_tmp/sql_gap.json"
+  _write_json "$EPHEMERAL_FILE_WRITER_GAP_DATA" '[]' "$_jq_tmp/eph_gap.json"
+  _write_json "$CRON_GAP_DATA" '[]' "$_jq_tmp/cron_gap.json"
+  _write_json "$AFFECTED_WINDOWS" '{}' "$_jq_tmp/affected.json"
+  _write_json "${MIGRATION_TRANSFER_STATS:-null}" 'null' "$_jq_tmp/transfer.json"
+
   JITTER_COUNT=$(echo "${JITTER_COUNT:-0}" | tr -dc '0-9' || echo 0)
   [[ -z "$JITTER_COUNT" ]] && JITTER_COUNT=0
   POST_FILE_WRITER_LINES=${POST_FILE_WRITER_LINES:-0}
@@ -721,7 +730,7 @@ build_report_json() {
     --arg fw_last "$(get_val FILE_WRITER_LAST)" \
     --argjson fw_lines "$POST_FILE_WRITER_LINES" \
     --argjson fw_size "$(get_val FILE_WRITER_SIZE)" \
-    --argjson fw_gap "$FILE_WRITER_GAP_DATA" \
+    --slurpfile fw_gap "$_jq_tmp/fw_gap.json" \
     --arg sqlite_status "$sqlite_status" \
     --arg sqlite_pid "$(get_val SQLITE_PID)" \
     --arg sqlite_integrity "$(get_val SQLITE_INTEGRITY)" \
@@ -731,14 +740,14 @@ build_report_json() {
     --argjson sqlite_size "$(get_val SQLITE_SIZE)" \
     --argjson sqlite_gaps_gt2 "$(get_val SQLITE_GAPS_GT2)" \
     --argjson sqlite_max_gap "$(get_val SQLITE_MAX_GAP)" \
-    --argjson sqlite_affected "$AFFECTED_WINDOWS" \
+    --slurpfile sqlite_affected "$_jq_tmp/affected.json" \
     --argjson sqlite_jitter "$(safe_num "$JITTER_COUNT")" \
-    --argjson sqlite_gap "$SQLITE_GAP_DATA" \
+    --slurpfile sqlite_gap "$_jq_tmp/sql_gap.json" \
     --arg crond_status "$(get_val CROND_STATUS)" \
     --arg crontab_entry "$(get_val CRONTAB_ENTRY)" \
     --arg cron_last "$(get_val CRON_LAST)" \
     --argjson cron_lines "$POST_CRON_LINES" \
-    --argjson cron_gap "$CRON_GAP_DATA" \
+    --slurpfile cron_gap "$_jq_tmp/cron_gap.json" \
     --arg http_status_svc "$http_status" \
     --arg http_pid "$(get_val HTTP_PID)" \
     --argjson http_code "$(get_val HTTP_STATUS)" \
@@ -747,7 +756,7 @@ build_report_json() {
     --arg eph_fw_last "$(get_val EPHEMERAL_FILE_WRITER_LAST)" \
     --argjson eph_fw_lines "$POST_EPHEMERAL_FILE_WRITER_LINES" \
     --argjson eph_fw_size "$(get_val EPHEMERAL_FILE_WRITER_SIZE)" \
-    --argjson eph_fw_gap "$EPHEMERAL_FILE_WRITER_GAP_DATA" \
+    --slurpfile eph_fw_gap "$_jq_tmp/eph_gap.json" \
     --arg eph_sqlite_status "$eph_sqlite_status" \
     --arg eph_sqlite_pid "$(get_val EPHEMERAL_SQLITE_PID)" \
     --arg eph_sqlite_integrity "$(get_val EPHEMERAL_SQLITE_INTEGRITY)" \
@@ -778,8 +787,14 @@ build_report_json() {
     --argjson post_cron_lines "$POST_CRON_LINES" \
     --argjson cron_diff "$CRON_DIFF" \
     --arg fw_pid_match "$FILE_WRITER_PID_MATCH" \
+    --arg fw_pid_pre "$PRE_FILE_WRITER_PID" \
+    --arg fw_pid_post "$(get_val FILE_WRITER_PID)" \
     --arg sqlite_pid_match "$SQLITE_PID_MATCH" \
+    --arg sqlite_pid_pre "$PRE_SQLITE_PID" \
+    --arg sqlite_pid_post "$(get_val SQLITE_PID)" \
     --arg http_pid_match "$HTTP_PID_MATCH" \
+    --arg http_pid_pre "$PRE_HTTP_PID" \
+    --arg http_pid_post "$(get_val HTTP_PID)" \
     --argjson hostname_preserved "$(bool_json "$([ "$(get_val VM_HOSTNAME)" == "$PRE_HOSTNAME" ] && echo true || echo false)")" \
     --arg pre_large_sha "$PRE_LARGE_FILE_SHA256" \
     --arg post_large_sha "$POST_LARGE_FILE_SHA256" \
@@ -791,7 +806,7 @@ build_report_json() {
     --argjson pre_eph_large_size "$PRE_EPHEMERAL_LARGE_FILE_SIZE" \
     --argjson post_eph_large_size "$POST_EPHEMERAL_LARGE_FILE_SIZE" \
     --argjson eph_large_sha_match "$eph_large_intact_json" \
-    --argjson migration_transfer_stats "$MIGRATION_TRANSFER_STATS" \
+    --slurpfile migration_transfer_stats "$_jq_tmp/transfer.json" \
     --argjson persistent_data_intact "$(bool_json "$([ "$FILE_WRITER_DIFF" -ge 0 ] && [ "$SQLITE_DIFF" -ge 0 ] && [ "$CRON_DIFF" -ge 0 ] && [ "$(get_val SQLITE_INTEGRITY)" == "ok" ] && echo true || echo false)")" \
     --argjson ephemeral_data_intact "$(bool_json "$(if is_windows_vm "$VM_OS"; then echo true; elif [ "$EPHEMERAL_FILE_WRITER_DIFF" -ge 0 ] && [ "$EPHEMERAL_SQLITE_DIFF" -ge 0 ] && [ "$(get_val EPHEMERAL_SQLITE_INTEGRITY)" == "ok" ]; then echo true; else echo false; fi)")" \
     --argjson all_processes_running "$(bool_json "$(if [ "$(get_val FILE_WRITER_PID)" != "none" ] && [ "$(get_val SQLITE_PID)" != "none" ] && [ "$(get_val HTTP_PID)" != "none" ]; then if is_windows_vm "$VM_OS"; then echo true; elif [ "$(get_val EPHEMERAL_FILE_WRITER_PID)" != "none" ] && [ "$(get_val EPHEMERAL_SQLITE_PID)" != "none" ]; then echo true; else echo false; fi; else echo false; fi)")" \
@@ -821,7 +836,7 @@ build_report_json() {
             file_size_bytes: $fw_size,
             last_entry: $fw_last,
             write_interval_sec: 1,
-            gap_analysis: $fw_gap
+            gap_analysis: $fw_gap[0]
           },
           sqlite_writer: {
             status: $sqlite_status,
@@ -836,9 +851,9 @@ build_report_json() {
             gap_analysis: {
               gaps_greater_than_2s: $sqlite_gaps_gt2,
               max_gap_seconds: $sqlite_max_gap,
-              affected_time_range: $sqlite_affected,
+              affected_time_range: $sqlite_affected[0],
               sporadic_jitter_windows: $sqlite_jitter,
-              all_slow_windows: $sqlite_gap
+              all_slow_windows: $sqlite_gap[0]
             }
           },
           cron_job: {
@@ -848,7 +863,7 @@ build_report_json() {
             log_line_count: $cron_lines,
             last_entry: $cron_last,
             interval: "every 1 minute",
-            gap_analysis: $cron_gap
+            gap_analysis: $cron_gap[0]
           },
           http_server: {
             status: $http_status_svc,
@@ -868,7 +883,7 @@ build_report_json() {
             file_size_bytes: $eph_fw_size,
             last_entry: $eph_fw_last,
             write_interval_sec: 1,
-            gap_analysis: $eph_fw_gap
+            gap_analysis: $eph_fw_gap[0]
           },
           sqlite_writer: {
             status: $eph_sqlite_status,
@@ -922,9 +937,9 @@ build_report_json() {
           }
         },
         process_continuity: {
-          file_writer_pid: $fw_pid_match,
-          sqlite_writer_pid: $sqlite_pid_match,
-          http_server_pid: $http_pid_match
+          file_writer: {status: $fw_pid_match, pre: $fw_pid_pre, post: $fw_pid_post},
+          sqlite_writer: {status: $sqlite_pid_match, pre: $sqlite_pid_pre, post: $sqlite_pid_post},
+          http_server: {status: $http_pid_match, pre: $http_pid_pre, post: $http_pid_post}
         },
         network: {
           hostname_preserved: $hostname_preserved
@@ -948,7 +963,7 @@ build_report_json() {
           post_size_bytes: $post_eph_large_size
         }
       },
-      migration_transfer_stats: $migration_transfer_stats,
+      migration_transfer_stats: $migration_transfer_stats[0],
       verdict: {
         persistent_data_intact: $persistent_data_intact,
         ephemeral_data_intact: $ephemeral_data_intact,

@@ -46,16 +46,33 @@ vmshift-validator/
 │   ├── migrate-vm.sh             # Render + apply Forklift Plan/Migration CRs
 │   ├── pre-migration-check.sh    # Baseline snapshot inside VM (JSON)
 │   ├── post-migration-check.sh   # Compare post vs pre (JSON + verdict)
+│   ├── capture-prometheus-metrics.sh  # Prometheus metric snapshots (pre/during/post)
+│   ├── capture-component-logs.sh # Grab forklift-controller, virt-launcher, virt-handler logs
 │   ├── aggregate-report.sh       # Build summary.json from per-VM results
+│   ├── backfill-prometheus.sh    # Backfill historical Prometheus data
+│   ├── fetch-reports.sh          # Sync reports from remote bastion
+│   ├── generate-mixed-config.sh  # Generate mixed-workload kube-burner configs
+│   ├── migration-monitor.sh      # Live migration monitoring
+│   ├── setup-windows-golden-image.sh  # Windows golden image provisioning
+│   ├── test-json-schema.sh       # Validate report JSON schema
 │   └── lib/
 │       ├── executor.sh           # Profile-aware kubectl/virtctl routing (gcp vs baremetal-l2)
 │       ├── ssh.sh                # virtctl ssh helpers (run_on_vm, wait_for_guest_ssh)
-│       └── log.sh                # Structured logging with verbosity levels
+│       ├── log.sh                # Structured logging with verbosity levels
+│       ├── prometheus.sh         # Prometheus query helpers
+│       ├── guest-agent.sh        # QEMU guest agent interaction
+│       ├── vm-os.sh              # VM OS detection (fedora/centos/windows)
+│       ├── vm-data-collector.sh  # Linux guest data collection
+│       └── vm-data-collector-windows.sh  # Windows guest data collection (PowerShell)
 ├── templates/
 │   ├── migration-plan.yaml.template   # Forklift Plan template (REPLACE_* placeholders)
 │   └── migration.yaml.template        # Forklift Migration trigger template
 ├── keys/                         # SSH key pair (gitignored)
-└── reports/                      # Per-run migration reports (gitignored)
+├── reports/                      # Per-run migration reports (gitignored)
+└── cclm-chaos/                   # Chaos testing framework (gitignored)
+    ├── scenarios/                # A1-A7, B1-B6, C1-C3, D4, E1/E3, X1-X7
+    ├── templates/                # Chaos pod/trigger templates
+    └── *.md                      # Bug reports, analysis docs
 ```
 
 ## Key Concepts
@@ -75,10 +92,11 @@ Profile selection: `MIGRATION_PROFILE=gcp|baremetal-l2`
 
 ### Per-VM Migration Pipeline (`migrate-single-vm.sh`)
 
-1. Verify workloads running on source
-2. Pre-migration check — capture services, SQLite rows, file SHAs, HTTP status → JSON
-3. Render and apply Forklift Plan + Migration CRs, poll until complete
-4. Post-migration check on target — compare against pre snapshot, emit PASS/FAIL verdict
+1. `[1/4] VERIFY` — Confirm workloads running on source
+2. `[2/4] PRE-MIGRATION CHECK` — Capture services, SQLite rows, file SHAs, HTTP status → JSON + Prometheus baseline
+3. `[3/4] MIGRATE + WAIT` — Render and apply Forklift Plan + Migration CRs, poll until complete, capture Prometheus during-migration snapshots
+4. `Component logs` — Capture forklift-controller, virt-launcher, virt-handler logs (both clusters)
+5. `[4/4] POST-MIGRATION CHECK` — Compare post vs pre snapshot, emit PASS/FAIL verdict + Prometheus post-migration capture
 
 ### Template Substitution
 
@@ -154,7 +172,7 @@ See `config.example.yaml` for the full list with documentation.
 - Library functions live in `scripts/lib/` and are sourced by scripts that need them
 - `executor.sh` abstracts kubectl/virtctl calls — always use `kubectl_source`, `kubectl_target`, `kubectl_migration`, `virtctl_source`, `virtctl_target` instead of raw `kubectl`/`virtctl`
 - Scripts accept CLI arguments parsed with `while [[ $# -gt 0 ]]` case blocks
-- Logging uses `scripts/lib/log.sh` functions: `log_step`, `log_task`, `log_info`, `log_verbose`, `log_debug`
+- Logging uses `scripts/lib/log.sh` functions: `log.info`, `log.verbose`, `log.debug`, `log.warn`, `log.error`, `log.success`, `step.begin`/`step.end`, `task.begin`/`task.pass`/`task.fail`
 - JSON output uses `jq` for construction and querying
 - All Makefile targets have `## description` comments for `make help` auto-documentation
 
@@ -180,12 +198,21 @@ Pre/post migration validates inside each VM via `virtctl ssh`:
 
 ```
 reports/run-<timestamp>/
-├── summary.json               # Aggregate pass/fail counts, durations
+├── summary.json                    # Aggregate pass/fail counts, durations
 ├── vm-svc-0/
-│   ├── pre-migration-*.json   # Baseline snapshot
-│   ├── migration-metrics-*.json
-│   ├── post-migration-*.json  # Comparison + verdict
-│   └── run.log                # Per-VM pipeline log
+│   ├── pre-migration-*.json        # Baseline snapshot (guest services, SQLite, files)
+│   ├── migration-metrics-*.json    # Timing, nodes, pipeline steps
+│   ├── post-migration-*.json       # Comparison + verdict
+│   ├── *.json.verdict              # PASS/FAIL verdict file
+│   ├── prometheus-pre-*.json       # Prometheus metrics before migration
+│   ├── prometheus-during-*.json    # Prometheus metrics during migration
+│   ├── prometheus-post-*.json      # Prometheus metrics after migration
+│   ├── forklift-controller.log     # Forklift controller logs (time-scoped)
+│   ├── virt-launcher-source.log    # Source virt-launcher compute container
+│   ├── virt-launcher-target.log    # Target virt-launcher compute container
+│   ├── virt-handler-source.log     # Source node virt-handler
+│   ├── virt-handler-target.log     # Target node virt-handler
+│   └── run.log                     # Per-VM pipeline log
 └── ...
 ```
 
@@ -215,6 +242,50 @@ infra/
             ├── summary.md
             └── inventory.md
 ```
+
+## Windows VM Support
+
+Windows VMs (`vm-win-*`) use a separate data collection path:
+- Guest commands run via PowerShell through `virtctl ssh` (user: `Administrator`, auth: password from `VM_PASSWORD`)
+- Data collector: `scripts/lib/vm-data-collector-windows.sh` (uses `Get-WmiObject` instead of `Get-Process` for process detection)
+- SQLite table name is `test` (not `heartbeats` like Linux)
+- Ephemeral disk checks and cron checks are skipped for Windows
+- OS detection via `scripts/lib/vm-os.sh` — checks VM labels and guest agent info
+
+## Chaos Testing (`cclm-chaos/`)
+
+The `cclm-chaos/` directory (gitignored) contains a fault injection framework for CCLM resilience testing. Each scenario has its own directory under `scenarios/`:
+
+- **A-series (A1-A7)** — Baseline migrations (no fault injection)
+- **B-series (B1-B6)** — Network fault injection (NIC blackout during migration)
+- **C-series (C1-C3)** — Storage fault injection
+- **D-series (D4)** — Compute fault injection
+- **E-series (E1, E3)** — Combined fault injection
+- **X-series (X1-X7)** — Pod kill scenarios (virt-launcher, virt-handler, forklift-controller)
+
+Each scenario directory typically contains:
+- `scenario-spec.md` — What the scenario tests
+- `chaos-trigger.sh` — Fault injection script
+- `reports/` — Per-scenario results and bug reports
+
+## Deploying to Cloud29 (Bastion)
+
+The project runs against bare-metal clusters via the cloud29 bastion. To sync and run:
+
+```bash
+# Sync code to bastion (excludes config, keys, reports, git)
+rsync -avz --exclude='.git' --exclude='reports/' --exclude='keys/' \
+  --exclude='config/' --exclude='config.yaml' --exclude='.config.mk' \
+  --exclude='infra/' ./ cloud29:/root/vmshift-validator/
+
+# Run migration on bastion
+ssh cloud29 'cd /root/vmshift-validator && make migrate-selective VMS=vm-svc-1,vm-win-1 LOG_LEVEL=2'
+
+# Sync reports back
+rsync -avz cloud29:/root/vmshift-validator/reports/run-<timestamp>/ reports/run-<timestamp>/
+```
+
+The bastion has its own `config.yaml`, `.config.mk`, and `keys/` — never overwrite those when syncing.
 
 ## Gotchas
 

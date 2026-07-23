@@ -96,3 +96,6 @@ tests/
 
 # Internal operational documentation (not for public repo)
 CCLM-LIVE-MIGRATION.md
+
+# Analysis and reference docs (local only)
+docs/

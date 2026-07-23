@@ -476,6 +476,14 @@ render-mixed-config: ## Generate mixed-workload kube-burner config from per-type
 		> "$(KUBE_BURNER_DIR)/vm-mixed.yml"
 
 density-setup: $(if $(_HAS_MIX),render-mixed-config) render-config ## Run kube-burner and stabilize workloads
+	@if echo "$(KUBE_BURNER_CONFIG)" | grep -qi windows || [[ -n "$(WIN_VMS)" ]]; then \
+		if ! KUBECONFIG=$(SOURCE_KUBECONFIG) kubectl get secret $(WIN_OOBE_SECRET) -n $(NAMESPACE) >/dev/null 2>&1; then \
+			echo "Copying Windows OOBE secret $(WIN_OOBE_SECRET) from $(WIN_GOLDEN_NAMESPACE) to $(NAMESPACE)..."; \
+			KUBECONFIG=$(SOURCE_KUBECONFIG) kubectl get secret $(WIN_OOBE_SECRET) -n $(WIN_GOLDEN_NAMESPACE) -o json \
+				| python3 -c "import sys,json; s=json.load(sys.stdin); s['metadata']={'name':s['metadata']['name'],'namespace':'$(NAMESPACE)'}; print(json.dumps(s))" \
+				| KUBECONFIG=$(SOURCE_KUBECONFIG) kubectl apply -f -; \
+		fi; \
+	fi
 	@LOG_LEVEL=$(LOG_LEVEL) GA_READY_TIMEOUT=$(GA_READY_TIMEOUT) GA_READY_INTERVAL=$(GA_READY_INTERVAL) $(SCRIPTS_DIR)/density-setup.sh \
 		--kubeconfig $(SOURCE_KUBECONFIG) \
 		--config $(RENDERED_CONFIG) \

@@ -354,6 +354,20 @@ jq -n \
     }
   }' > "${VM_REPORT_DIR}/migration-metrics-${VM_NAME}.json"
 
+# Capture component logs (forklift-controller, virt-launcher, virt-handler)
+step.begin "Component logs"
+"${SCRIPT_DIR}/capture-component-logs.sh" \
+  --vm "$VM_NAME" \
+  --namespace "$NAMESPACE" \
+  --mtv-namespace "$MTV_NAMESPACE" \
+  --source-node "$SOURCE_NODE" \
+  --target-node "$TARGET_NODE" \
+  --output-dir "$VM_REPORT_DIR" \
+  --since-epoch "$MIGRATION_START_TIME" \
+  --source-kubeconfig "$SOURCE_KUBECONFIG" \
+  --target-kubeconfig "$TARGET_KUBECONFIG" \
+  --migration-profile "$MIGRATION_PROFILE" && step.end "PASS" || step.end "WARN"
+
 if [[ "$MIGRATION_FAILED" == "true" ]]; then
   log.error "Migration failed for ${VM_NAME}"
   exit 1

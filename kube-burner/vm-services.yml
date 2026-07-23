@@ -22,7 +22,7 @@ jobs:
 
     # 3 Fedora VMs for baseline mixed re-run
     - objectTemplate: templates/vm-services.yml
-      replicas: 3
+      replicas: 5
       inputVars:
         name: vm-svc
         image: REPLACE_CONTAINER_IMAGE

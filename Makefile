@@ -267,7 +267,7 @@ MIGRATION_ARGS := \
 	density-setup density-status density-teardown \
 	discover-vms migrate-selective migrate-dry-run \
 	report list-reports fetch-reports logs \
-	reauth-blue \
+	reauth-blue reauth-green \
 	ssh status \
 	clean-migrations clean-generated clean-reports clean-logs clean-all \
 	e2e
@@ -319,6 +319,7 @@ help: ## Show help
 	@echo ""
 	@echo "Auth:"
 	@echo "  make reauth-blue                Reauthenticate blue cluster (baremetal-l2)"
+	@echo "  make reauth-green               Reauthenticate green cluster (baremetal-l2)"
 	@echo ""
 	@echo "Cleanup:"
 	@echo "  make clean-migrations           Delete Forklift CRs"
@@ -629,6 +630,26 @@ reauth-blue: ## Reauthenticate blue (source) cluster via oc login (baremetal-l2)
 		--insecure-skip-tls-verify \
 		--kubeconfig "$$SOURCE_BASTION_KUBECONFIG"; \
 	echo "Blue cluster reauthenticated. Kubeconfig: $$SOURCE_BASTION_KUBECONFIG"
+
+reauth-green: ## Reauthenticate green (target) cluster via oc login (baremetal-l2)
+	@PROFILE_ENV="$(PROJECT_DIR)/profiles/baremetal-l2.env"; \
+	if [[ ! -f "$$PROFILE_ENV" ]]; then \
+		echo "ERROR: $$PROFILE_ENV not found."; \
+		echo "  cp profiles/baremetal-l2.env.example profiles/baremetal-l2.env"; \
+		exit 1; \
+	fi; \
+	source "$$PROFILE_ENV"; \
+	if [[ -z "$$GREEN_API_URL" || -z "$$GREEN_USERNAME" || -z "$$GREEN_PASSWORD" ]]; then \
+		echo "ERROR: GREEN_API_URL, GREEN_USERNAME, GREEN_PASSWORD must be set in $$PROFILE_ENV"; \
+		exit 1; \
+	fi; \
+	echo "Logging in to green cluster: $$GREEN_API_URL"; \
+	oc login "$$GREEN_API_URL" \
+		--username "$$GREEN_USERNAME" \
+		--password "$$GREEN_PASSWORD" \
+		--insecure-skip-tls-verify \
+		--kubeconfig "$$TARGET_BASTION_KUBECONFIG"; \
+	echo "Green cluster reauthenticated. Kubeconfig: $$TARGET_BASTION_KUBECONFIG"
 
 status: ## Show VM on both clusters (VM=name)
 ifndef VM

@@ -33,6 +33,6 @@ krknctl run pod-scenarios \
   --disruption-count 1 \
   --kill-timeout 300 \
   --expected-recovery-time 180 \
-  --trigger-command "oc --context ${BLUE_CONTEXT} get migration -n $MTV_NAMESPACE -o jsonpath='{.items[*].metadata.name}' | grep -q ." \
+  --trigger-command "oc --context ${GREEN_CONTEXT} get migration -n $MTV_NAMESPACE -o jsonpath='{.items[*].metadata.name}' | grep -q ." \
   --triggers-interval 5 \
   --triggers-timeout 300

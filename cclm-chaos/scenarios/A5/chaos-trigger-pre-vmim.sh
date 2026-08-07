@@ -20,8 +20,13 @@ SOURCE_KUBECONFIG="${SOURCE_KUBECONFIG:-/root/blue/kubeconfig}"
 # source context once here so TRIGGER_CMD can use --context instead --
 # chaos-trigger.sh builds the actual merged kubeconfig.
 BLUE_IP_KUBECONFIG="${BLUE_IP_KUBECONFIG:-/root/krknctl-kc/blue-ip-kubeconfig}"
+GREEN_IP_KUBECONFIG="${GREEN_IP_KUBECONFIG:-/root/krknctl-kc/green-ip-kubeconfig}"
 BLUE_CONTEXT="$(KUBECONFIG="$BLUE_IP_KUBECONFIG" kubectl config current-context)"
+GREEN_CONTEXT="$(KUBECONFIG="$GREEN_IP_KUBECONFIG" kubectl config current-context)"
 
-TRIGGER_CMD="test \"\$(oc --context ${BLUE_CONTEXT} get migration -n $MTV_NAMESPACE -o json | jq '.items | length')\" -gt 0 && test \"\$(oc --context ${BLUE_CONTEXT} get vmim -n $NAMESPACE -o json | jq '.items | length')\" -eq 0"
+# Migration CRs only exist on whichever cluster hosts Forklift (green in this
+# environment) -- checking them on blue always returns "resource type not
+# found" and the trigger can never satisfy (same class of bug as A7).
+TRIGGER_CMD="test \"\$(oc --context ${GREEN_CONTEXT} get migration -n $MTV_NAMESPACE -o json | jq '.items | length')\" -gt 0 && test \"\$(oc --context ${BLUE_CONTEXT} get vmim -n $NAMESPACE -o json | jq '.items | length')\" -eq 0"
 
 bash "$SCRIPT_DIR/chaos-trigger.sh" "$VM_NAME" "$NAMESPACE" "$TRIGGER_CMD" 5 300

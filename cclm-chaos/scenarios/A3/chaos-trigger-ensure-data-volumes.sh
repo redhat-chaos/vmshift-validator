@@ -20,6 +20,14 @@ TARGET_KUBECONFIG="${TARGET_KUBECONFIG:-/root/green/kubeconfig}"
 
 ts() { date -u +%FT%TZ; }
 
+# krknctl's scenario container can't see host paths like $TARGET_KUBECONFIG
+# and can't resolve the lab's hostname-based API server URL (in-container DNS
+# bug) -- a trigger-command built with either breaks silently. Resolve the
+# target context once here so TRIGGER_CMD can use --context instead --
+# chaos-trigger.sh builds the actual merged kubeconfig.
+GREEN_IP_KUBECONFIG="${GREEN_IP_KUBECONFIG:-/root/krknctl-kc/green-ip-kubeconfig}"
+GREEN_CONTEXT="$(KUBECONFIG="$GREEN_IP_KUBECONFIG" kubectl config current-context)"
+
 SOURCE_NODE=$(oc --kubeconfig "$SOURCE_KUBECONFIG" get pods -n "$NAMESPACE" \
   -l "kubevirt.io/vm=$VM_NAME" -o jsonpath='{.items[0].spec.nodeName}' 2>/dev/null || echo "")
 if [[ -z "$SOURCE_NODE" ]]; then
@@ -37,7 +45,7 @@ PRE_VH_POD=$(oc --kubeconfig "$SOURCE_KUBECONFIG" get pods -n "$VH_NAMESPACE" \
   -l "kubevirt.io=virt-handler" --field-selector "spec.nodeName=$SOURCE_NODE" \
   -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
 
-TRIGGER_CMD="oc --kubeconfig=\"$TARGET_KUBECONFIG\" get plans.forklift.konveyor.io \"${VM_NAME}-migration-plan\" -n \"$MTV_NAMESPACE\" -o jsonpath='{.status.migration.vms[0].phase}' | grep -qx $INJECT_PHASE"
+TRIGGER_CMD="oc --context ${GREEN_CONTEXT} get plans.forklift.konveyor.io \"${VM_NAME}-migration-plan\" -n \"$MTV_NAMESPACE\" -o jsonpath='{.status.migration.vms[0].phase}' | grep -qx $INJECT_PHASE"
 
 echo "[$(ts)] Delegating to chaos-trigger.sh, gated on Forklift phase=$INJECT_PHASE (pre-vh-pod: $PRE_VH_POD)"
 DELEGATE_START_TS=$(date +%s)

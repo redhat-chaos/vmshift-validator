@@ -1,0 +1,76 @@
+# B3 Network Partition — Full Sweep
+# 100% packet loss (full network partition) injected mid-flight
+# 2 interfaces (br-ex, br-migration) x 3 runs + 1 baseline = 7 iterations
+# 7 VMs total, Fedora only
+#
+# After density-setup, replace BATCHID:
+#   sed -i "s/BATCHID/<uuid>/g" iterations.yaml
+
+sweep_name: "B3-partition-sweep"
+description: "B3 full sweep — 100% loss on br-ex + br-migration, 3 runs each, mid-flight injection"
+date: "2026-07-15"
+
+defaults:
+  chaos_duration: 900
+  expected_outcome: failed
+  inject_after: vmim_running
+  gateway_label: "node-role.kubernetes.io/worker"
+  cooldown_s: 120
+  namespace: vm-services
+  source_kubeconfig: /root/blue/kubeconfig
+  target_kubeconfig: /root/green/kubeconfig
+  migration_profile: baremetal-l2
+  migration_max_attempts: 120
+  vmim_poll_timeout: 300
+
+iterations:
+
+  # --- Baseline (no chaos) ---
+
+  - tag: baseline-no-chaos
+    name: "baseline | no chaos | 1 VM"
+    skip_chaos: true
+    expected_outcome: succeeded
+    interface: br-ex
+    vms:
+      - vm-svc-BATCHID-1
+
+  # --- 100% loss on br-ex ---
+
+  - tag: 100pct-brex-1vm-r1
+    name: "100% loss | br-ex | mid-flight | 1 VM | run 1/3"
+    interface: br-ex
+    vms:
+      - vm-svc-BATCHID-2
+
+  - tag: 100pct-brex-1vm-r2
+    name: "100% loss | br-ex | mid-flight | 1 VM | run 2/3"
+    interface: br-ex
+    vms:
+      - vm-svc-BATCHID-3
+
+  - tag: 100pct-brex-1vm-r3
+    name: "100% loss | br-ex | mid-flight | 1 VM | run 3/3"
+    interface: br-ex
+    vms:
+      - vm-svc-BATCHID-4
+
+  # --- 100% loss on br-migration ---
+
+  - tag: 100pct-brmig-1vm-r1
+    name: "100% loss | br-migration | mid-flight | 1 VM | run 1/3"
+    interface: br-migration
+    vms:
+      - vm-svc-BATCHID-5
+
+  - tag: 100pct-brmig-1vm-r2
+    name: "100% loss | br-migration | mid-flight | 1 VM | run 2/3"
+    interface: br-migration
+    vms:
+      - vm-svc-BATCHID-6
+
+  - tag: 100pct-brmig-1vm-r3
+    name: "100% loss | br-migration | mid-flight | 1 VM | run 3/3"
+    interface: br-migration
+    vms:
+      - vm-svc-BATCHID-7

@@ -1,0 +1,38 @@
+{
+  "sweep": 2,
+  "date": "2026-07-03",
+  "vm_prefix": "vm-svc-2799feea",
+  "baseline_total_s": 43,
+  "baseline_migration_s": 34,
+  "results": [
+    {"latency": "0ms",   "vm": "vm-svc-2799feea-1",  "total_s": 43,  "migration_s": 34,  "ratio_vs_baseline_migration": 1.00, "grade": "Baseline", "source_node": "unknown", "run_dir": "run-B1-sweep2-0ms-20260703T122609Z"},
+    {"latency": "10ms",  "vm": "vm-svc-2799feea-2",  "total_s": 53,  "migration_s": 46,  "ratio_vs_baseline_migration": 1.35, "grade": "Normal",   "source_node": "d39-h04-000-r660", "run_dir": "run-B1-sweep2-10ms-20260703T122925Z"},
+    {"latency": "15ms",  "vm": "vm-svc-2799feea-3",  "total_s": 53,  "migration_s": 43,  "ratio_vs_baseline_migration": 1.26, "grade": "Normal",   "source_node": "d39-h04-000-r660", "run_dir": "run-B1-sweep2-15ms-20260703T123307Z"},
+    {"latency": "20ms",  "vm": "vm-svc-2799feea-4",  "total_s": 64,  "migration_s": 59,  "ratio_vs_baseline_migration": 1.74, "grade": "Degraded", "source_node": "d38-h19-000-r660", "run_dir": "run-B1-sweep2-20ms-20260703T123611Z"},
+    {"latency": "30ms",  "vm": "vm-svc-2799feea-5",  "total_s": 84,  "migration_s": 75,  "ratio_vs_baseline_migration": 2.21, "grade": "Degraded", "source_node": "d39-h05-000-r660", "run_dir": "run-B1-sweep2-30ms-20260703T124058Z"},
+    {"latency": "40ms",  "vm": "vm-svc-2799feea-6",  "total_s": 94,  "migration_s": 88,  "ratio_vs_baseline_migration": 2.59, "grade": "Degraded", "source_node": "d39-h06-000-r660", "run_dir": "run-B1-sweep2-40ms-20260703T124713Z"},
+    {"latency": "50ms",  "vm": "vm-svc-2799feea-7",  "total_s": 94,  "migration_s": 86,  "ratio_vs_baseline_migration": 2.53, "grade": "Degraded", "source_node": "d39-h06-000-r660", "run_dir": "run-B1-sweep2-50ms-20260703T125101Z",
+      "note": "Same node as 40ms — possible netem overlap if 40ms chaos still active (600s duration). Migration time similar to 40ms."},
+    {"latency": "60ms",  "vm": "vm-svc-2799feea-8",  "total_s": 95,  "migration_s": 84,  "ratio_vs_baseline_migration": 2.47, "grade": "Degraded", "source_node": "d39-h06-000-r660", "run_dir": "run-B1-sweep2-60ms-20260703T125448Z",
+      "note": "Same node as 40ms/50ms — migration time (84s) lower than expected, closer to 40ms level. Likely tc qdisc add failed because 40ms netem rule was still active."},
+    {"latency": "80ms",  "vm": "vm-svc-2799feea-9",  "total_s": 147, "migration_s": 136, "ratio_vs_baseline_migration": 4.00, "grade": "Severe",   "source_node": "d39-h06-000-r660", "run_dir": "run-B1-sweep2-80ms-20260703T130705Z",
+      "note": "Same node as 40/50/60ms but ran ~18min later — earlier chaos likely expired. Clean 80ms reading."},
+    {"latency": "100ms", "vm": "vm-svc-2799feea-10", "total_s": 188, "migration_s": 174, "ratio_vs_baseline_migration": 5.12, "grade": "Severe",   "source_node": "d39-h05-000-r660", "run_dir": "run-B1-sweep2-100ms-20260703T134200Z",
+      "note": "First attempt failed due to transient DNS resolution failure for cloud29 bastion. Retried successfully."}
+  ],
+  "observations": [
+    "Baseline migration time (34s) identical to Sweep 1 — very consistent",
+    "100ms result (188s/174s) nearly identical to S1 (188s/173s) — excellent reproducibility at high latency",
+    "40ms result (88s) exactly matches S1 — confirmed reproducibility",
+    "ISSUE: VMs 6,7,8,9 all on d39-h06-000-r660. 40/50/60ms chaos runs overlapped within 600s window. tc qdisc add fails when root qdisc already exists, so 50ms and 60ms likely migrated under 40ms netem rule",
+    "50ms (86s) and 60ms (84s) both close to 40ms (88s) — supports the overlap theory",
+    "80ms on same node but ran ~18min later (after all prior chaos expired) — shows proper 136s migration, confirming the data path was clean",
+    "20ms (59s migration) matches S1 (59s total) perfectly",
+    "30ms (75s migration) higher than S1 (59s total) — but 30ms in S1 may have had an undercount; S2's 75s seems more proportional",
+    "Transient DNS failure for bastion around 13:10 — resolved after ~30min, root cause unknown"
+  ],
+  "data_quality_flags": {
+    "suspect_overlap": ["50ms", "60ms"],
+    "reason": "Multiple VMs on d39-h06 with 600s chaos duration caused tc qdisc add conflicts. 50ms and 60ms results are likely running under 40ms netem."
+  }
+}

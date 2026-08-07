@@ -1,0 +1,11 @@
+kraken:
+  kubeconfig_path: /root/blue/kubeconfig
+  exit_on_failure: false
+  chaos_scenarios:
+    - hog_scenarios:
+        - REPLACE_SCENARIO_FILE
+
+tunings:
+  wait_duration: 0
+  iterations: 1
+  daemon_mode: false

@@ -1,0 +1,45 @@
+# B3 Network Partition Smoke Test
+# 1 baseline (no chaos) + 1 mid-flight partition on br-ex
+# 2 VMs total, Fedora only
+#
+# After density-setup, replace 240b0e95:
+#   sed -i "s/240b0e95/<uuid>/g" iterations-smoke.yaml
+
+sweep_name: "B3-smoke"
+description: "B3 smoke — 1 baseline + 1 mid-flight 100% loss on br-ex"
+date: "2026-07-15"
+
+defaults:
+  chaos_duration: 900
+  expected_outcome: failed
+  inject_after: vmim_running
+  gateway_label: "node-role.kubernetes.io/worker"
+  cooldown_s: 120
+  namespace: vm-services
+  source_kubeconfig: /root/blue/kubeconfig
+  target_kubeconfig: /root/green/kubeconfig
+  migration_profile: baremetal-l2
+  migration_max_attempts: 120
+  vmim_poll_timeout: 300
+
+iterations:
+
+  # --- Baseline (no chaos) ---
+
+  - tag: baseline-no-chaos
+    name: "baseline | no chaos | 1 VM"
+    skip_chaos: true
+    expected_outcome: succeeded
+    interface: br-ex
+    vms:
+      - vm-svc-240b0e95-1
+
+  # --- Pre-migration partition on br-migration ---
+  # br-migration carries VMIM data transfer (port 9185).
+  # SSH/kubectl use br-ex so pre-check works fine.
+
+  - tag: 100pct-brmig-1vm-smoke
+    name: "100% loss | br-migration | pre-migration | 1 VM | smoke"
+    interface: br-migration
+    vms:
+      - vm-svc-240b0e95-2

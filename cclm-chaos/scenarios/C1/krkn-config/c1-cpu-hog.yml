@@ -1,0 +1,10 @@
+duration: 300
+workers: ''
+hog-type: cpu
+image: quay.io/krkn-chaos/krkn-hog
+namespace: default
+cpu-load-percentage: 90
+cpu-method: all
+node-selector: "kubernetes.io/hostname=REPLACE_SOURCE_NODE"
+number-of-nodes: 1
+taints: []

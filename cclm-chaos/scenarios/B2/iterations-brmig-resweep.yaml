@@ -1,0 +1,50 @@
+# B2 — br-migration packet loss resweep (1%, 2%, 5%, 10%)
+# Single VM per loss level, node-network-chaos (ng), VMIM-running trigger
+# Date: 2026-07-30
+
+sweep_name: "brmig-resweep-v2"
+description: "B2 br-migration packet loss resweep v2 — 1/2/5/10% loss, 1 VM per level (fixed merged kubeconfig)"
+date: "2026-07-30"
+
+defaults:
+  chaos_trigger: chaos-trigger.sh
+  trigger_mode: vmim-running
+  chaos_duration: 300
+  all_workers: true
+  gateway_label: "node-role.kubernetes.io/worker"
+  cooldown_s: 90
+  namespace: vm-services
+  source_kubeconfig: /root/blue/kubeconfig
+  target_kubeconfig: /root/green/kubeconfig
+  migration_profile: baremetal-l2
+  migration_max_attempts: 180
+
+iterations:
+
+  - tag: 1pct-brmig-1vm
+    name: "1% loss | br-migration"
+    loss_percent: 1
+    interface: br-migration
+    vms:
+      - vm-svc-09a5220f-4
+
+  - tag: 2pct-brmig-1vm
+    name: "2% loss | br-migration"
+    loss_percent: 2
+    interface: br-migration
+    vms:
+      - vm-svc-09a5220f-5
+
+  - tag: 5pct-brmig-1vm
+    name: "5% loss | br-migration"
+    loss_percent: 5
+    interface: br-migration
+    vms:
+      - vm-svc-09a5220f-7
+
+  - tag: 10pct-brmig-1vm
+    name: "10% loss | br-migration"
+    loss_percent: 10
+    interface: br-migration
+    vms:
+      - vm-svc-09a5220f-8

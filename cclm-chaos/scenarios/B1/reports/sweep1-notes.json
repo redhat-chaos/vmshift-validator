@@ -1,0 +1,26 @@
+{
+  "sweep": 1,
+  "date": "2026-07-03",
+  "vm_prefix": "vm-svc-8b3d9e4e",
+  "baseline_duration_s": 34,
+  "results": [
+    {"latency": "0ms",   "vm": "vm-svc-8b3d9e4e-1",  "total_s": 34,  "migration_s": null, "ratio": 1.00, "grade": "Baseline", "run_dir": "run-B1-sweep1-0ms-20260703T111303Z"},
+    {"latency": "10ms",  "vm": "vm-svc-8b3d9e4e-2",  "total_s": 47,  "migration_s": null, "ratio": 1.38, "grade": "Normal",   "run_dir": "run-B1-sweep1-10ms-20260703T112313Z"},
+    {"latency": "15ms",  "vm": "vm-svc-8b3d9e4e-3",  "total_s": 52,  "migration_s": null, "ratio": 1.53, "grade": "Degraded", "run_dir": "run-B1-sweep1-15ms-20260703T113153Z"},
+    {"latency": "20ms",  "vm": "vm-svc-8b3d9e4e-4",  "total_s": 59,  "migration_s": null, "ratio": 1.74, "grade": "Degraded", "run_dir": "run-B1-sweep1-20ms-20260703T113847Z"},
+    {"latency": "30ms",  "vm": "vm-svc-8b3d9e4e-5",  "total_s": 59,  "migration_s": null, "ratio": 1.74, "grade": "Degraded", "run_dir": "run-B1-sweep1-30ms-20260703T114503Z"},
+    {"latency": "40ms",  "vm": "vm-svc-8b3d9e4e-6",  "total_s": 88,  "migration_s": null, "ratio": 2.59, "grade": "Degraded", "run_dir": "run-B1-sweep1-40ms-20260703T114928Z"},
+    {"latency": "50ms",  "vm": "vm-svc-8b3d9e4e-7",  "total_s": 102, "migration_s": null, "ratio": 3.00, "grade": "Severe",   "run_dir": "run-B1-sweep1-50ms-20260703T115322Z"},
+    {"latency": "60ms",  "vm": "vm-svc-8b3d9e4e-8",  "total_s": 126, "migration_s": 113,  "ratio": 3.71, "grade": "Severe",   "run_dir": "run-B1-sweep1-60ms-20260703T115733Z"},
+    {"latency": "80ms",  "vm": "vm-svc-8b3d9e4e-9",  "total_s": 157, "migration_s": 142,  "ratio": 4.62, "grade": "Severe",   "run_dir": "run-B1-sweep1-80ms-20260703T120333Z"},
+    {"latency": "100ms", "vm": "vm-svc-8b3d9e4e-10", "total_s": 188, "migration_s": 173,  "ratio": 5.53, "grade": "Severe",   "run_dir": "run-B1-sweep1-100ms-20260703T121806Z"}
+  ],
+  "observations": [
+    "Clean curve with no anomalies — every latency point landed where expected",
+    "20ms and 30ms both at 59s (1.74x) — suggests a plateau or quantization effect around 20-30ms",
+    "Sharp inflection between 30ms (1.74x) and 40ms (2.59x) — 0.85x jump for just 10ms increase",
+    "50ms exactly at 3.00x — right at the Severe boundary",
+    "100ms at 5.53x — highest ratio seen across all rounds, consistent steep curve above 50ms",
+    "All 10 migrations PASS — data integrity fully preserved even at 100ms latency"
+  ]
+}

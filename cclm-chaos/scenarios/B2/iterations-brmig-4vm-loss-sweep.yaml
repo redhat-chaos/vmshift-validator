@@ -1,0 +1,82 @@
+# B2 — br-migration packet loss sweep, 4 VMs per iteration (2 Fedora + 2 Windows)
+# VMIM-running trigger: chaos waits for migration to reach Running phase
+# 4 iterations: 1 baseline (0%) + 3 loss levels (5/8/10%)
+# Each iteration: 2 Fedora + 2 Windows = 4 VMs. Total VMs: 16
+#
+# br-migration is the dedicated interface carrying CCLM live-migration data
+# traffic, distinct from br-ex (general pod/service egress) — this sweep
+# isolates packet-loss impact specifically on the migration data plane.
+#
+# Prerequisites:
+#   - VMs running on source cluster (density batch 446e62a5)
+#   - Merged/IP-based kubeconfig at /root/krknctl-kc/merged-ip-kubeconfig (auto-created if missing)
+#
+# Usage:
+#   ./chaos-sweep.sh -f iterations-brmig-4vm-loss-sweep.yaml
+#   ./chaos-sweep.sh -f iterations-brmig-4vm-loss-sweep.yaml --dry-run
+#   ./chaos-sweep.sh -f iterations-brmig-4vm-loss-sweep.yaml --start-from 8pct-4vm
+
+sweep_name: "brmig-4vm-loss-sweep"
+description: "B2 br-migration packet loss sweep — VMIM-running trigger, 0/5/8/10% loss, 2F+2W per iteration"
+date: "2026-08-07"
+
+defaults:
+  chaos_trigger: chaos-trigger.sh
+  trigger_mode: vmim-running
+  chaos_duration: 300
+  all_workers: true
+  gateway_label: "node-role.kubernetes.io/worker"
+  interface: br-migration
+  cooldown_s: 90
+  namespace: vm-services
+  source_kubeconfig: /root/blue/kubeconfig
+  target_kubeconfig: /root/green/kubeconfig
+  migration_profile: baremetal-l2
+  migration_max_attempts: 180
+
+iterations:
+
+  # --- 0% baseline (no chaos) ---
+  - tag: 0pct-4vm
+    name: "baseline | 0% loss | br-migration | 2F+2W"
+    loss_percent: 0
+    skip_chaos: true
+    interface: br-migration
+    vms:
+      - vm-svc-446e62a5-48
+      - vm-svc-446e62a5-49
+      - vm-win-446e62a5-33
+      - vm-win-446e62a5-34
+
+  # --- 5% loss ---
+  - tag: 5pct-4vm
+    name: "5% loss | br-migration | 2F+2W"
+    loss_percent: 5
+    interface: br-migration
+    vms:
+      - vm-svc-446e62a5-50
+      - vm-svc-446e62a5-51
+      - vm-win-446e62a5-35
+      - vm-win-446e62a5-36
+
+  # --- 8% loss ---
+  - tag: 8pct-4vm
+    name: "8% loss | br-migration | 2F+2W"
+    loss_percent: 8
+    interface: br-migration
+    vms:
+      - vm-svc-446e62a5-52
+      - vm-svc-446e62a5-53
+      - vm-win-446e62a5-37
+      - vm-win-446e62a5-38
+
+  # --- 10% loss ---
+  - tag: 10pct-4vm
+    name: "10% loss | br-migration | 2F+2W"
+    loss_percent: 10
+    interface: br-migration
+    vms:
+      - vm-svc-446e62a5-54
+      - vm-svc-446e62a5-55
+      - vm-win-446e62a5-39
+      - vm-win-446e62a5-40

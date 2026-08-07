@@ -1,0 +1,104 @@
+# B1 — br-migration latency sweep, 4 VMs per iteration (2 Fedora + 2 Windows)
+# VMIM-running trigger: chaos waits for migration to reach Running phase
+# 6 iterations: 1 baseline (0ms) + 5 latency levels (5/10/15/20/30ms)
+# Each iteration: 2 Fedora + 2 Windows = 4 VMs. Total VMs: 24
+#
+# br-migration is the dedicated interface carrying CCLM live-migration data
+# traffic, distinct from br-ex (general pod/service egress) — this sweep
+# isolates latency impact specifically on the migration data plane.
+#
+# Prerequisites:
+#   - VMs running on source cluster (density batch 446e62a5)
+#   - Merged/IP-based kubeconfig at /root/krknctl-kc/merged-ip-kubeconfig (auto-created if missing)
+#
+# Usage:
+#   ./chaos-sweep.sh -f iterations-brmig-4vm-latency-sweep.yaml
+#   ./chaos-sweep.sh -f iterations-brmig-4vm-latency-sweep.yaml --dry-run
+#   ./chaos-sweep.sh -f iterations-brmig-4vm-latency-sweep.yaml --start-from 10ms-4vm
+
+sweep_name: "brmig-4vm-latency-sweep"
+description: "B1 br-migration latency sweep — VMIM-running trigger, 0/5/10/15/20/30ms, 2F+2W per iteration"
+date: "2026-08-07"
+
+defaults:
+  chaos_trigger: chaos-trigger.sh
+  trigger_mode: vmim-running
+  chaos_duration: 300
+  all_workers: true
+  gateway_label: "node-role.kubernetes.io/worker"
+  interface: br-migration
+  cooldown_s: 90
+  namespace: vm-services
+  source_kubeconfig: /root/blue/kubeconfig
+  target_kubeconfig: /root/green/kubeconfig
+  migration_profile: baremetal-l2
+  migration_max_attempts: 180
+
+iterations:
+
+  # --- 0ms baseline (no chaos) ---
+  - tag: 0ms-4vm
+    name: "baseline | 0ms latency | br-migration | 2F+2W"
+    latency: "0ms"
+    skip_chaos: true
+    interface: br-migration
+    vms:
+      - vm-svc-446e62a5-19
+      - vm-svc-446e62a5-20
+      - vm-win-446e62a5-13
+      - vm-win-446e62a5-14
+
+  # --- 5ms latency ---
+  - tag: 5ms-4vm
+    name: "5ms latency | br-migration | 2F+2W"
+    latency: "5ms"
+    interface: br-migration
+    vms:
+      - vm-svc-446e62a5-22
+      - vm-svc-446e62a5-24
+      - vm-win-446e62a5-15
+      - vm-win-446e62a5-16
+
+  # --- 10ms latency ---
+  - tag: 10ms-4vm
+    name: "10ms latency | br-migration | 2F+2W"
+    latency: "10ms"
+    interface: br-migration
+    vms:
+      - vm-svc-446e62a5-26
+      - vm-svc-446e62a5-28
+      - vm-win-446e62a5-17
+      - vm-win-446e62a5-18
+
+  # --- 15ms latency ---
+  - tag: 15ms-4vm
+    name: "15ms latency | br-migration | 2F+2W"
+    latency: "15ms"
+    interface: br-migration
+    vms:
+      - vm-svc-446e62a5-31
+      - vm-svc-446e62a5-33
+      - vm-win-446e62a5-19
+      - vm-win-446e62a5-20
+
+  # --- 20ms latency ---
+  - tag: 20ms-4vm
+    name: "20ms latency | br-migration | 2F+2W"
+    latency: "20ms"
+    interface: br-migration
+    vms:
+      - vm-svc-446e62a5-35
+      - vm-svc-446e62a5-37
+      - vm-win-446e62a5-21
+      - vm-win-446e62a5-22
+
+  # --- 30ms latency ---
+  - tag: 30ms-4vm
+    name: "30ms latency | br-migration | 2F+2W"
+    latency: "30ms"
+    interface: br-migration
+    vms:
+      - vm-svc-446e62a5-38
+      - vm-svc-446e62a5-39
+      - vm-win-446e62a5-23
+      - vm-win-446e62a5-24

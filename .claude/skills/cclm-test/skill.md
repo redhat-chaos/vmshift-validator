@@ -346,8 +346,10 @@ Watch both processes. The migration typically takes 60–120s. Report progress t
 When the user asks for a sweep (multiple latency values, multiple VMs, multiple iterations), use the `chaos-sweep.sh` orchestrator instead of running individual tests:
 
 1. **Create a YAML iteration file** under `cclm-chaos/scenarios/<ID>/iterations-<name>.yaml`. Reference existing examples:
-   - `cclm-chaos/scenarios/B1/iterations-brex-event-driven-sweep.yaml` (event-driven trigger)
-   - `cclm-chaos/scenarios/B1/iterations-brex-ng-mixed-sweep.yaml` (krknctl trigger, mixed Fedora+Windows)
+   - `cclm-chaos/scenarios/B1/iterations-brex-4vm-latency-sweep.yaml` (br-ex latency levels, mixed Fedora+Windows)
+   - `cclm-chaos/scenarios/B1/iterations-brmig-4vm-latency-sweep.yaml` (br-migration latency levels, mixed Fedora+Windows)
+   - `cclm-chaos/scenarios/B2/iterations-brex-4vm-loss-sweep.yaml` (br-ex packet-loss levels, mixed Fedora+Windows)
+   - `cclm-chaos/scenarios/B2/iterations-brmig-4vm-loss-sweep.yaml` (br-migration packet-loss levels, mixed Fedora+Windows)
 
 2. **Dry-run first** to verify the iteration plan:
    ```bash

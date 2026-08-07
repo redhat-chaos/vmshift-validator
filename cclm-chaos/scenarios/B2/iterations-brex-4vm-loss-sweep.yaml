@@ -1,0 +1,78 @@
+# B2 — br-ex packet loss sweep, 4 VMs per iteration (2 Fedora + 2 Windows)
+# VMIM-running trigger: chaos waits for migration to reach Running phase
+# 4 iterations: 1 baseline (0%) + 3 loss levels (5/10/15%)
+# Each iteration: 2 Fedora + 2 Windows = 4 VMs. Total VMs: 16
+#
+# Prerequisites:
+#   - VMs running on source cluster (density batch 446e62a5)
+#   - Merged/IP-based kubeconfig at /root/krknctl-kc/merged-ip-kubeconfig (auto-created if missing)
+#
+# Usage:
+#   ./chaos-sweep.sh -f iterations-brex-4vm-loss-sweep.yaml
+#   ./chaos-sweep.sh -f iterations-brex-4vm-loss-sweep.yaml --dry-run
+#   ./chaos-sweep.sh -f iterations-brex-4vm-loss-sweep.yaml --start-from 10pct-4vm
+
+sweep_name: "brex-4vm-loss-sweep"
+description: "B2 br-ex packet loss sweep — VMIM-running trigger, 0/5/10/15% loss, 2F+2W per iteration"
+date: "2026-08-07"
+
+defaults:
+  chaos_trigger: chaos-trigger.sh
+  trigger_mode: vmim-running
+  chaos_duration: 300
+  all_workers: true
+  gateway_label: "node-role.kubernetes.io/worker"
+  interface: br-ex
+  cooldown_s: 90
+  namespace: vm-services
+  source_kubeconfig: /root/blue/kubeconfig
+  target_kubeconfig: /root/green/kubeconfig
+  migration_profile: baremetal-l2
+  migration_max_attempts: 180
+
+iterations:
+
+  # --- 0% baseline (no chaos) ---
+  - tag: 0pct-4vm
+    name: "baseline | 0% loss | br-ex | 2F+2W"
+    loss_percent: 0
+    skip_chaos: true
+    interface: br-ex
+    vms:
+      - vm-svc-446e62a5-40
+      - vm-svc-446e62a5-41
+      - vm-win-446e62a5-25
+      - vm-win-446e62a5-26
+
+  # --- 5% loss ---
+  - tag: 5pct-4vm
+    name: "5% loss | br-ex | 2F+2W"
+    loss_percent: 5
+    interface: br-ex
+    vms:
+      - vm-svc-446e62a5-42
+      - vm-svc-446e62a5-43
+      - vm-win-446e62a5-27
+      - vm-win-446e62a5-28
+
+  # --- 10% loss ---
+  - tag: 10pct-4vm
+    name: "10% loss | br-ex | 2F+2W"
+    loss_percent: 10
+    interface: br-ex
+    vms:
+      - vm-svc-446e62a5-44
+      - vm-svc-446e62a5-45
+      - vm-win-446e62a5-29
+      - vm-win-446e62a5-30
+
+  # --- 15% loss ---
+  - tag: 15pct-4vm
+    name: "15% loss | br-ex | 2F+2W"
+    loss_percent: 15
+    interface: br-ex
+    vms:
+      - vm-svc-446e62a5-46
+      - vm-svc-446e62a5-47
+      - vm-win-446e62a5-31
+      - vm-win-446e62a5-32

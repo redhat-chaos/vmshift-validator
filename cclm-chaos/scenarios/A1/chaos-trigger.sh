@@ -30,6 +30,10 @@ if [[ ! -f "$MERGED_KUBECONFIG" ]]; then
   KUBECONFIG="$BLUE_IP_KUBECONFIG:$GREEN_IP_KUBECONFIG" kubectl config view --flatten > "$MERGED_KUBECONFIG"
 fi
 BLUE_CONTEXT="${BLUE_CONTEXT:-$(KUBECONFIG="$BLUE_IP_KUBECONFIG" kubectl config current-context)}"
+# This file is shared/cached across scenarios -- some need green as the
+# default action-context, so always (re)point it at blue here rather than
+# trusting whichever scenario last created or touched it.
+kubectl --kubeconfig "$MERGED_KUBECONFIG" config use-context "$BLUE_CONTEXT" >/dev/null
 
 DEFAULT_TRIGGER_CMD="oc --context ${BLUE_CONTEXT} get vmim -n \"$NAMESPACE\" -o json \
   | jq -e --arg vm \"$VM_NAME\" '.items[] | select(.spec.vmiName == \$vm) | select(.status.phase == \"Running\")' >/dev/null 2>&1"

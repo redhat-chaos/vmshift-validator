@@ -17,6 +17,12 @@ MERGED_KC="${MERGED_KC:-/root/krknctl-kc/merged-ip-kubeconfig}"
 
 [[ -f "$MERGED_KC" ]] || KUBECONFIG="$BLUE_KC:$GREEN_KC" kubectl config view --flatten > "$MERGED_KC"
 GREEN_CTX=$(KUBECONFIG="$GREEN_KC" kubectl config current-context)
+BLUE_CTX=$(KUBECONFIG="$BLUE_KC" kubectl config current-context)
+# This file is shared/cached across scenarios -- some need green as the
+# default action-context, so always (re)point it at blue here (this
+# scenario's action targets the source node) rather than trusting whichever
+# scenario last created or touched it.
+kubectl --kubeconfig "$MERGED_KC" config use-context "$BLUE_CTX" >/dev/null
 
 krknctl run node-network-chaos \
   --node-name "$SOURCE_NODE" \

@@ -51,6 +51,12 @@ if [[ ! -f "$MERGED_KUBECONFIG" ]]; then
   KUBECONFIG="$BLUE_IP_KUBECONFIG:$GREEN_IP_KUBECONFIG" kubectl config view --flatten > "$MERGED_KUBECONFIG"
 fi
 GREEN_CONTEXT="${GREEN_CONTEXT:-$(KUBECONFIG="$GREEN_IP_KUBECONFIG" kubectl config current-context)}"
+BLUE_CONTEXT="${BLUE_CONTEXT:-$(KUBECONFIG="$BLUE_IP_KUBECONFIG" kubectl config current-context)}"
+# This file is shared/cached across scenarios -- some need green as the
+# default action-context, so always (re)point it at blue here (this
+# scenario's action targets source workers) rather than trusting whichever
+# scenario last created or touched it.
+kubectl --kubeconfig "$MERGED_KUBECONFIG" config use-context "$BLUE_CONTEXT" >/dev/null
 
 # --- Step 2: Resolve target node(s) ---
 if [[ "$VM_NAME" != "<none>" ]] && [[ "$ALL_WORKERS" == "false" ]]; then

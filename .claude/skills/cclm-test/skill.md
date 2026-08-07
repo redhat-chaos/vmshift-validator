@@ -121,9 +121,13 @@ Check that Forklift controller pods are running.
 
 ### 2d. Krkn / krknctl availability (only if scenario uses krknctl)
 
-**Skip this step for direct-injection scenarios** (B1, B3, B4, B5, B6, A1, C1, D4) — they don't use krknctl. Check by grepping the chaos-trigger.sh for `krknctl`.
+**Don't assume from a scenario ID or series which pattern applies — scripts get migrated to krknctl over time and stale assumptions cause this step to be wrongly skipped.** Check the actual script for *this* scenario:
 
-For krknctl-based scenarios:
+```bash
+grep -q 'krknctl' cclm-chaos/scenarios/<ID>/chaos-trigger.sh && echo "uses krknctl" || echo "direct injection"
+```
+
+Skip this step only if that grep says "direct injection". For krknctl-based scenarios:
 
 ```bash
 ssh <BASTION_SSH> 'which krknctl 2>/dev/null && krknctl version 2>/dev/null || echo "krknctl not found"'
@@ -203,24 +207,57 @@ ssh <BASTION_SSH> 'KUBECONFIG=<BASTION_SOURCE_KC> kubectl get pods -n <NAMESPACE
 
 For infrastructure targets (gateway nodes, forklift-controller, etc.), resolve those too.
 
-### 3d. Determine chaos injection method
+### 3d. Determine chaos injection method — existing script is always first priority
 
-If a `chaos-trigger.sh` exists for this scenario, use it directly — it encodes the correct trigger logic and parameters.
+**Never hand-build a chaos command as a first resort.** Every scenario directory already has working script(s) — use them, in this escalation order, and only fall back to step 5 after steps 1–4 are genuinely exhausted:
 
-Chaos triggers fall into two patterns — check which one the scenario uses:
+**1. Identify and use the scenario's own script(s).** In order of preference:
+   - `chaos-sweep.sh`, if the user asked for a sweep (multiple iterations/values — see Phase 5c)
+   - `chaos-trigger.sh` — the default single-iteration entry point
+   - Any other top-level `*.sh` in the scenario dir (e.g. `a1-multi-phase-test.sh`) if the requested variant isn't covered by `chaos-trigger.sh` — ask the user which to use if it's ambiguous
 
-```bash
-grep -q 'krknctl' cclm-chaos/scenarios/<ID>/chaos-trigger.sh && echo "uses krknctl" || echo "direct injection"
-```
+   The script itself is authoritative, not the scenario-spec.md prose — "Automation"/"Primary tooling" fields in the spec can be stale. Re-derive the actual method by reading the script and grepping it:
+   ```bash
+   grep -q 'krknctl' cclm-chaos/scenarios/<ID>/chaos-trigger.sh && echo "uses krknctl" || echo "direct injection"
+   ```
 
-| Pattern | Scenarios | How it works | Dependencies |
-|---------|-----------|-------------|--------------|
-| **krknctl-based** | A2, A3, A4, A7, B1-ng, B2-ng, C2, C3 | `krknctl run` via podman container | krknctl + podman socket |
-| **Direct injection** | A1, B1, B3, B4, B5, B6, C1, D4 | `kubectl exec` → MCD/chaos pod → `nsenter` → `tc`/`kill`/etc. | Only kubectl access |
+**2. Before running it, resolve and pass its arguments for *this* run.** These scripts are written to take args/env vars rather than hardcode values — read the script's usage/arg-parsing before invoking it, then pass this run's real values explicitly rather than trusting the script's own defaults:
+   - VM name, source node (from 3c), `<NAMESPACE>`, `<BASTION_SOURCE_KC>` / `<BASTION_TARGET_KC>` (from env.yaml)
+   - Watch for scripts or krknctl invocations that default to a *different* kubeconfig than the standard one (e.g. a node-IP-based kubeconfig for krknctl like `/root/krknctl-kc/blue-ip-kubeconfig`) — verify that path actually exists on the bastion before relying on it; override via the script's own KUBECONFIG env var/arg if it doesn't match this environment
+   - If any value the script defaults to (kubeconfig, pod label, namespace) doesn't match what you resolved in Phase 2/3c, override it via args/env — don't edit the script
 
-For krknctl-based scenarios, invoke the `/krkn-scenario` skill if you need to build a new command.
+   **Multi-cluster trigger-commands need a merged kubeconfig with `--context`, not a second `--kubeconfig`.** A `--trigger-command` passed to `krknctl run` executes *inside the scenario's podman container*, which only has access to whatever file was mounted via krknctl's own top-level `--kubeconfig` flag. If the trigger-command's own `oc`/`kubectl` call hardcodes a *different* `--kubeconfig` path — a host path like `/root/blue/kubeconfig`, or anything resolving to the lab's hostname-based API URL (DNS doesn't resolve inside the container) — it silently fails on every single poll. krknctl treats a failing command the same as "not yet satisfied," so this produces **no error at all**: the trigger just times out (`--triggers-timeout`) and skips the chaos (`--triggers-on-timeout skip`) with zero visible sign anything was wrong. Confirmed on both A1 (pod-kill trigger checking source VMIM) and B1 (netem trigger checking target VMIM) — this applies whenever a trigger-command needs to check live cluster state, whether that's the same cluster the action targets or a different one:
 
-**Do NOT build krknctl commands manually** — use either existing chaos-trigger.sh or the `/krkn-scenario` skill.
+   1. Build one IP-substituted kubeconfig with **both** contexts (check for an existing one first, e.g. `/root/krknctl-kc/merged-ip-kubeconfig` — reuse it rather than rebuilding):
+      ```bash
+      KUBECONFIG="$BLUE_IP_KUBECONFIG:$GREEN_IP_KUBECONFIG" kubectl config view --flatten > "$MERGED_KUBECONFIG"
+      ```
+      Order matters: `kubectl config view --flatten` keeps the *first* file's `current-context` as the merged file's default context. List whichever cluster the main krknctl **action** (not the trigger) needs to target first, so the action still hits the right cluster with no extra flag needed.
+   2. Pass `$MERGED_KUBECONFIG` — not a single-cluster IP kubeconfig — to krknctl's own top-level `--kubeconfig`.
+   3. In the `--trigger-command` itself, drop any `--kubeconfig` flag and use `--context <name>` instead, resolved once via `kubectl config current-context` against the single-cluster IP kubeconfig for whichever side the trigger needs to query:
+      ```bash
+      BLUE_CONTEXT="$(KUBECONFIG=$BLUE_IP_KUBECONFIG kubectl config current-context)"
+      GREEN_CONTEXT="$(KUBECONFIG=$GREEN_IP_KUBECONFIG kubectl config current-context)"
+      ```
+
+   If a chaos-trigger.sh's trigger-command never seems to satisfy despite the underlying condition being independently confirmed true (e.g. VMIM really is `Running` per a manual poll run outside krknctl), suspect this exact bug before anything else — check what kubeconfig/context the trigger-command actually uses.
+
+**3. If the script fails, diagnose before abandoning it:**
+   - Cross-check the exact values used (kubeconfig paths, node name, pod label/selector, namespace) against the live cluster — a stale node name or wrong kubeconfig is the most common cause
+   - Re-check Phase 2d/2e preconditions (krknctl installed + correct version, podman socket active, any kubeconfig file the script/krknctl references actually present on the bastion)
+   - Fix the specific broken input and retry the same script — one fix-and-retry cycle before escalating further
+
+**4. If it still fails, check upstream before working around it.** Use `gh` against the krkn-chaos GitHub org to check for known issues, flag changes, or documented behavior:
+   ```bash
+   gh issue list --repo krkn-chaos/krknctl --search "<symptom>"
+   gh issue list --repo krkn-chaos/krkn --search "<symptom>"
+   gh issue list --repo krkn-chaos/krkn-hub --search "<symptom>"
+   ```
+   Also verify current flag/usage syntax on the bastion (`krknctl describe pod-scenarios`, etc.) in case the script predates a krknctl version change.
+
+**5. Only after 1–4 are exhausted, fall back to a workaround** — e.g. the scenario spec's "Manual (alternative)" direct-injection commands, or an equivalent hand-built command. Tell the user you're deviating from the documented script, explain what failed and what you tried, and treat this as a plan change requiring the same Phase 4 confirmation as the original.
+
+For krknctl-based scenarios where you need to design a genuinely new scenario (not troubleshoot an existing one), invoke the `/krkn-scenario` skill instead of hand-building flags.
 
 ### 3e. Determine iteration number
 
@@ -258,7 +295,7 @@ ssh <BASTION_SSH> 'cd <BASTION_REPO> && bash cclm-chaos/scenarios/<ID>/chaos-tri
 
 **Migration command:**
 ```bash
-ssh <BASTION_SSH> 'cd <BASTION_REPO> && make migrate-selective VMS=<VM_NAME> MIGRATION_PROFILE=<MIGRATION_PROFILE> RUN_TAG=<ID>-iteration<N>'
+ssh <BASTION_SSH> 'cd <BASTION_REPO> && make migrate-selective VMS=<VM_NAME> MIGRATION_PROFILE=<MIGRATION_PROFILE> RUN_TAG=<ID>-iteration<N>-<YYYYMMDDTHHMMSSZ>'
 ```
 
 **Execution order:** <chaos first / migration first> — <why>
@@ -292,7 +329,7 @@ The execution order depends on the **trigger gate in the scenario spec**, not th
 ssh <BASTION_SSH> 'cd <BASTION_REPO> && nohup bash cclm-chaos/scenarios/<ID>/chaos-trigger.sh <VM_NAME> <LATENCY> > /tmp/chaos-<VM_NAME>.log 2>&1 &'
 
 # Session 2: migration (separate SSH call)
-ssh <BASTION_SSH> 'cd <BASTION_REPO> && make migrate-selective VMS=<VM_NAME> MIGRATION_PROFILE=<MIGRATION_PROFILE> RUN_TAG=<tag>'
+ssh <BASTION_SSH> 'cd <BASTION_REPO> && make migrate-selective VMS=<VM_NAME> MIGRATION_PROFILE=<MIGRATION_PROFILE> RUN_TAG=<tag>-<YYYYMMDDTHHMMSSZ>'
 
 # Check chaos trigger output after migration completes
 ssh <BASTION_SSH> 'cat /tmp/chaos-<VM_NAME>.log'
@@ -357,25 +394,25 @@ This is critical — **do not skip this phase**. Confirm the chaos was injected,
 
 ### 6a. Check chaos-trigger output
 
-The chaos-trigger.sh stdout (or nohup log file) should show evidence of injection. Look for:
+The chaos-trigger.sh stdout (or nohup log file) should show evidence of injection. Which pattern applies depends on what you found in Phase 2d/3d for *this* scenario's actual script (`grep -q krknctl`) — don't assume from the scenario ID, the mapping drifts as scripts get migrated to krknctl over time.
 
-**Direct injection scenarios (B1, B3, B4, B5, B6, A1, C1, D4):**
+**If direct injection:**
 
 | Scenario type | Evidence of injection |
 |---------------|----------------------|
-| `direct tc/netem` (B1, B3) | "✓ applied" per node in output, "Netem active on N/N workers" |
-| `direct pod kill` (A1, X-series) | Pod deleted, "kubectl delete pod" in output |
-| `direct NIC down` (B6) | "interface down" in output |
-| `direct DNS kill` (B5) | CoreDNS pods deleted |
+| `direct tc/netem` | "✓ applied" per node in output, "Netem active on N/N workers" |
+| `direct pod kill` | Pod deleted, "kubectl delete pod" in output |
+| `direct NIC down` | "interface down" in output |
+| `direct DNS kill` | CoreDNS pods deleted |
 
-**krknctl-based scenarios (A2, A3, A4, A7, B1-ng, B2-ng, C2, C3):**
+**If krknctl-based:**
 
 | Scenario type | Evidence of injection |
 |---------------|----------------------|
 | `pod-scenarios` | "Deleting pod <name>" in krkn log, OR pod gone from `kubectl get pods` |
 | `network-chaos` | krknctl log shows "applying tc rules" |
-| `node-cpu-hog` (C1) | krknctl log shows "starting stress-ng" |
-| `node-memory-hog` (C3) | krknctl log shows "memory hogging started" |
+| `node-cpu-hog` | krknctl log shows "starting stress-ng" |
+| `node-memory-hog` | krknctl log shows "memory hogging started" |
 
 ### 6b. Verify on the cluster
 
@@ -702,9 +739,13 @@ If migration exceeds 10 minutes:
 
 ### krknctl fails
 
-- Check the troubleshooting doc at `.claude/skills/cclm-chaos-test/troubleshooting.md`
+- Follow the escalation order in Phase 3d step 3–4: re-check kubeconfig/node/label values first, retry, then check `gh issue list --repo krkn-chaos/krknctl --search "<symptom>"` before falling back to a manual workaround
 - Common issue: GLIBC incompatibility — suggest using v0.10.21
 - Common issue: podman socket not enabled
+
+### Trigger never satisfies (chaos silently skipped after full timeout)
+
+If `krknctl` logs "not satisfied" once and then goes silent for the entire `--triggers-timeout`, with no chaos ever applied and no error — this is almost always the multi-cluster kubeconfig bug in Phase 3d step 2, not a real timing miss. The trigger-command's `oc`/`kubectl` call can't reach the cluster it's checking from inside krknctl's container (wrong kubeconfig path, or a hostname URL that doesn't resolve there). Fix with the merged-kubeconfig + `--context` pattern in Phase 3d step 2, then re-verify by independently polling the same condition outside krknctl to confirm it really was true during the window the trigger missed.
 
 ---
 
@@ -714,9 +755,11 @@ If migration exceeds 10 minutes:
 2. **Always sync before running**: `<SYNC_CMD>` locally before any bastion ops.
 3. **Density-setup uses gcp profile internally** — don't pass `MIGRATION_PROFILE=<MIGRATION_PROFILE>` to it.
 4. **Migration uses `<MIGRATION_PROFILE>`**: Always pass `MIGRATION_PROFILE=<MIGRATION_PROFILE>` to `make migrate-selective`.
-5. **Never execute chaos without user confirmation** (Phase 4 is mandatory).
-6. **Verify injection happened** (Phase 6 is mandatory) — don't assume the command working means chaos was injected.
-7. **Use existing chaos-trigger.sh scripts** when they exist — they encode trigger timing and parameters.
-8. **Failed migrations are valid results** — collect and analyze them fully.
-9. **Ask questions when unsure** — it's better to ask than to guess wrong and waste a test run.
-10. **Report honestly** — if chaos wasn't confirmed or results are ambiguous, say so clearly.
+5. **`RUN_TAG` always has a timestamp postfix** — `<ID>-iteration<N>-<YYYYMMDDTHHMMSSZ>` (or `<tag>-<YYYYMMDDTHHMMSSZ>`), never bare. Prevents ambiguity/collisions when the same iteration is retried.
+6. **Never execute chaos without user confirmation** (Phase 4 is mandatory).
+7. **Verify injection happened** (Phase 6 is mandatory) — don't assume the command working means chaos was injected.
+8. **Existing scenario scripts are first priority, always** (`chaos-trigger.sh`/`chaos-sweep.sh`/scenario `*.sh`) — pass this run's real args/env rather than trusting script defaults; diagnose and retry on failure; check upstream krkn-chaos repos via `gh` before falling back to a manual workaround (see Phase 3d).
+9. **Failed migrations are valid results** — collect and analyze them fully.
+10. **Ask questions when unsure** — it's better to ask than to guess wrong and waste a test run.
+11. **Report honestly** — if chaos wasn't confirmed or results are ambiguous, say so clearly.
+12. **Any trigger-command that checks cluster state needs the merged-kubeconfig + `--context` pattern** (Phase 3d step 2), not a second `--kubeconfig` path — this applies whether it checks the same cluster the action targets or a different one. A silently-never-satisfied trigger (timeout, no chaos, no error) is the signature of getting this wrong.

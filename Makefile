@@ -382,6 +382,32 @@ check-prereqs: ## Verify CLI tools, kubeconfigs, and SSH key
 	[[ -f "$(SSH_KEY).pub" ]]       && echo "  OK: SSH public key"    || { echo "  MISSING: $(SSH_KEY).pub"; MISSING=1; }; \
 	[[ -f "$(KUBE_BURNER_DIR)/$(KUBE_BURNER_CONFIG)" ]] && echo "  OK: kube-burner config" || { echo "  MISSING: $(KUBE_BURNER_DIR)/$(KUBE_BURNER_CONFIG)"; MISSING=1; }; \
 	echo ""; \
+	if [[ "$(MIGRATION_PROFILE)" == "baremetal-l2" ]]; then \
+		PROFILE_ENV="$(PROJECT_DIR)/profiles/baremetal-l2.env"; \
+		if [[ -f "$$PROFILE_ENV" ]]; then \
+			source "$$PROFILE_ENV"; \
+			echo "Checking baremetal-l2 dual-bastion SSH key ($$BASTION_SSH_KEY)..."; \
+			echo "  (BASTION_SSH_KEY must exist at this exact absolute path on BOTH bastions —"; \
+			echo "   virtctl ssh for source runs on SOURCE_BASTION, target runs on TARGET_BASTION)"; \
+			if [[ -z "$$SOURCE_BASTION" || "$$SOURCE_BASTION" == "localhost" ]]; then \
+				[[ -f "$$BASTION_SSH_KEY" ]] && echo "  OK: key present on source bastion (localhost)" || \
+					{ echo "  MISSING on source bastion (localhost): $$BASTION_SSH_KEY"; MISSING=1; }; \
+			else \
+				ssh -o BatchMode=yes -o ConnectTimeout=10 "$$SOURCE_BASTION" "[[ -f '$$BASTION_SSH_KEY' ]]" 2>/dev/null && \
+					echo "  OK: key present on source bastion ($$SOURCE_BASTION)" || \
+					{ echo "  MISSING on source bastion ($$SOURCE_BASTION): $$BASTION_SSH_KEY"; MISSING=1; }; \
+			fi; \
+			if [[ -n "$$TARGET_BASTION" ]]; then \
+				ssh -o BatchMode=yes -o ConnectTimeout=10 "$$TARGET_BASTION" "[[ -f '$$BASTION_SSH_KEY' ]]" 2>/dev/null && \
+					echo "  OK: key present on target bastion ($$TARGET_BASTION)" || \
+					{ echo "  MISSING on target bastion ($$TARGET_BASTION): $$BASTION_SSH_KEY"; \
+					  echo "    -> post-migration checks on the target cluster will fail with 'Identity file not accessible'."; \
+					  echo "    -> fix: ssh $$TARGET_BASTION mkdir -p \$$(dirname $$BASTION_SSH_KEY) && scp $$BASTION_SSH_KEY $$TARGET_BASTION:$$BASTION_SSH_KEY"; \
+					  MISSING=1; }; \
+			fi; \
+			echo ""; \
+		fi; \
+	fi; \
 	if [[ $$MISSING -ne 0 ]]; then echo "Some prerequisites are missing."; exit 1; fi; \
 	echo "All prerequisites satisfied."
 

@@ -80,8 +80,23 @@ infra/
 tmp/
 temp/
 
-# Claude AI context (contains local-only infrastructure references)
-.claude/
+# Claude AI context (contains local-only infrastructure references).
+# Excludes contents (not the dirs themselves, via trailing /*) at each level so
+# the cclm-test negations below can re-include specific files — a parent
+# directory excluded outright (e.g. "dir/") can never be re-included by git.
+.claude/*
+!.claude/skills/
+
+.claude/skills/*
+!.claude/skills/cclm-test/
+
+# ...except the cclm-test skill, which is shared — its real bastion config
+# (env.yaml, generated from env.example.yaml) stays local and gitignored.
+.claude/skills/cclm-test/*
+!.claude/skills/cclm-test/skill.md
+!.claude/skills/cclm-test/bug-guidelines.md
+!.claude/skills/cclm-test/report-guidelines.md
+!.claude/skills/cclm-test/env.example.yaml
 
 # AI/IDE agent configs
 .agents/

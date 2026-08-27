@@ -104,7 +104,9 @@ Also ask if you don't know how to connect to the cluster:
 
 ## Phase 2 — Analyze Cluster State
 
-Before preparing the test, verify the cluster is ready. Run these checks via `ssh <BASTION_SSH>`:
+Before preparing the test, verify the cluster is ready. Run these checks via `ssh <BASTION_SSH>`.
+
+**Token efficiency: batch, don't fan out.** Steps 2a-2e below are independent read-only checks — combine as many as apply into a single `ssh <BASTION_SSH> bash <<'EOF' ... EOF` heredoc (or `&&`-chained one-liner) instead of one `ssh` call per check. Each separate `ssh` invocation costs a full round-trip's worth of tool overhead for output that's often one line. Skip 2d/2e per their own conditions (krknctl-only) but still fold whichever of 2a/2b/2c/2d/2e apply into one call.
 
 ### 2a. Cluster connectivity
 
@@ -247,6 +249,10 @@ For infrastructure targets (gateway nodes, forklift-controller, etc.), resolve t
 
 For krknctl-based scenarios needing a genuinely new scenario (not troubleshooting), invoke `/krkn-scenario` instead of hand-building flags.
 
+**When a scenario has multiple `*.sh` variants** (e.g. a phase-gated wrapper alongside the base `chaos-trigger.sh`, or a `*-multi-phase-test.sh`), don't read every variant "for context" — read only the one you determined is authoritative for this run's trigger gate. Reading unused sibling scripts is pure token cost with no effect on the run.
+
+**Reading `chaos-trigger.sh` itself:** its default `--trigger-command` is usually already inlined in the scenario's `scenario-spec.md` under "Trigger gate" — check there first. Only `cat`/read the full script when the spec's inlined command doesn't match what you need to pass (e.g. a custom trigger), or when diagnosing a failure.
+
 ### 3e. Determine iteration number
 
 ```bash
@@ -319,8 +325,12 @@ ssh <BASTION_SSH> 'cd <BASTION_REPO> && nohup bash cclm-chaos/scenarios/<ID>/cha
 # Session 2: migration (separate SSH call)
 ssh <BASTION_SSH> 'cd <BASTION_REPO> && make migrate-selective VMS=<VM_NAME> MIGRATION_PROFILE=<MIGRATION_PROFILE> RUN_TAG=<tag>-<YYYYMMDDTHHMMSSZ>'
 
-# Check chaos trigger output after migration completes
-ssh <BASTION_SSH> 'cat /tmp/chaos-<VM_NAME>.log'
+# Check chaos trigger output after migration completes — grep, don't cat.
+# krknctl/krkn logs open with ~50-70 lines of plugin-registration and
+# environment-table boilerplate that carries no signal; a raw `cat` or `tail`
+# pulls all of it into context for zero benefit. Pull only the lines that
+# matter: trigger satisfaction, the actual kill, and any error/warning.
+ssh <BASTION_SSH> "grep -E 'trigger condition (not )?satisfied|Deleting pod|Gracefully deleting|Killing|ERROR|WARNING' /tmp/chaos-<VM_NAME>.log"
 ```
 
 ### 5b. Monitor execution
@@ -328,6 +338,10 @@ ssh <BASTION_SSH> 'cat /tmp/chaos-<VM_NAME>.log'
 Watch both processes. The migration typically takes 60–120s. Report progress to the user as it happens.
 
 **Important:** Never run krknctl directly outside of chaos-trigger.sh — the script handles trigger timing, node resolution, and command execution.
+
+**When polling mid-run (e.g. after a `sleep N` to check trigger/VMIM progress), re-grep the log with the same pattern rather than re-`cat`ing it — otherwise every poll re-spends tokens on the same boilerplate header it already showed once.**
+
+**Use the bastion's clock for `RUN_TAG` timestamps, not the local machine's** — `ssh <BASTION_SSH> 'date -u +%Y%m%dT%H%M%SZ'` directly. Querying the local shell's `date` first (when its clock may be skewed relative to the lab) just costs an extra round trip when you redo it against the bastion anyway.
 
 ### 5c. Sweep execution (when user requests multiple iterations)
 
@@ -565,6 +579,7 @@ When a test run reveals a new defect (or re-confirms an existing one), create a 
 2. **Include actual pod names and UTC timestamps** from the confirmed run — not placeholders
 3. **Downstream timestamps matter** — record when chaos fired AND when each downstream effect occurred
 4. **Update bug-tracker.md immediately** after creating or updating any bug file
+5. **When updating an existing bug file, don't `cat` the whole thing first.** `grep -n '^#\|^##\|^###'` it to get the section map, then read only the header block (for reproducibility count/date to bump), the most recent `### Iteration N` block (to match its format), and the per-iteration table (to append a row) — a multi-hundred-line bug file usually only needs ~60-80 lines read to update correctly.
 
 ---
 

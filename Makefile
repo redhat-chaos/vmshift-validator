@@ -301,10 +301,14 @@ help: ## Show help
 	@echo "  make density-setup FEDORA_VMS=20 FEDORA_HEAVY_VMS=5 WIN_VMS=5"
 	@echo "                                  Three-way mixed workload"
 	@echo "  make density-status             Show VM status on source"
+	@echo "  make density-status COUNT_ONLY=1 OS=windows PHASE=Running"
+	@echo "                                  Count only, filtered by OS/phase"
 	@echo "  make density-teardown           Remove VMs from both clusters"
 	@echo ""
 	@echo "Phase 2 - Selective migration:"
 	@echo "  make discover-vms               List VMs available for migration"
+	@echo "  make discover-vms COUNT_ONLY=1 NOT_MIGRATED=1 OS=fedora"
+	@echo "                                  Count fedora VMs not yet migrated to target"
 	@echo "  make migrate-selective VMS=vm-a-0,vm-b-0"
 	@echo "  make migrate-selective N=3"
 	@echo "  make migrate-selective SELECTOR=vm-size=large"
@@ -522,11 +526,14 @@ density-setup: $(if $(_HAS_MIX),render-mixed-config) render-config ## Run kube-b
 		$(if $(_IS_WINDOWS),--win-oobe-secret $(WIN_OOBE_SECRET) --win-golden-namespace $(WIN_GOLDEN_NAMESPACE),) \
 		$(if $(LOCAL_SSH_OPTS),--local-ssh-opts "$(LOCAL_SSH_OPTS)",)
 
-density-status: ## Show density VM status on source cluster
+density-status: ## Show density VM status on source cluster (COUNT_ONLY=1, OS=fedora|windows, PHASE=Running to filter)
 	@$(SCRIPTS_DIR)/density-status.sh \
 		--kubeconfig $(SOURCE_KUBECONFIG) \
 		--namespace $(NAMESPACE) \
-		--label-selector $(VM_LABEL_SELECTOR)
+		--label-selector $(VM_LABEL_SELECTOR) \
+		$(if $(COUNT_ONLY),--count-only,) \
+		$(if $(OS),--os $(OS),) \
+		$(if $(PHASE),--phase $(PHASE),)
 
 density-teardown: ## Remove density VMs and migration CRs
 	@LOG_LEVEL=$(LOG_LEVEL) $(SCRIPTS_DIR)/density-teardown.sh \
@@ -542,11 +549,15 @@ density-teardown: ## Remove density VMs and migration CRs
 #  Phase 2 — Migration
 # ═══════════════════════════════════════════════════════════════
 
-discover-vms: ## List VMs available for migration
+discover-vms: ## List VMs available for migration (COUNT_ONLY=1, OS=fedora|windows, PHASE=Running, NOT_MIGRATED=1 to filter)
 	@$(SCRIPTS_DIR)/discover-vms.sh \
 		--kubeconfig $(SOURCE_KUBECONFIG) \
 		--namespace $(NAMESPACE) \
-		--label-selector $(VM_LABEL_SELECTOR)
+		--label-selector $(VM_LABEL_SELECTOR) \
+		$(if $(COUNT_ONLY),--count-only,) \
+		$(if $(OS),--os $(OS),) \
+		$(if $(PHASE),--phase $(PHASE),) \
+		$(if $(NOT_MIGRATED),--not-migrated --target-kubeconfig $(TARGET_KUBECONFIG),)
 
 migrate-selective: ## Migrate selected VMs in parallel (VMS=, N=, or SELECTOR=)
 	@set -e; \

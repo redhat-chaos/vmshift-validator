@@ -37,6 +37,18 @@ Read `.claude/skills/cclm-test/env.yaml` at the start of every session and subst
 
 If `env.yaml` is missing, copy it from `env.example.yaml` in the same directory and confirm the values with the user before proceeding (`env.yaml` is gitignored — it holds this bastion's real paths, while `env.example.yaml` is the committed template). If a key is blank, ask the user for the value — do not guess or reuse a path from a previous session.
 
+### Ad-hoc guest command (for spot-checking a VM's workload outside the standard pipeline)
+
+The pipeline scripts use `scripts/lib/ssh.sh`'s flags internally; use the same pattern for any manual check so you don't have to rediscover working flags by trial and error:
+
+```bash
+ssh <BASTION_SSH> "cd <BASTION_REPO> && KUBECONFIG=<BASTION_SOURCE_KC> virtctl ssh <SSH_USER>@vm/<VM_NAME> -n <NAMESPACE> -i keys/kube-burner \
+  --local-ssh-opts='-o StrictHostKeyChecking=no' --local-ssh-opts='-o UserKnownHostsFile=/dev/null' \
+  --command 'systemctl is-active file-writer sqlite-writer http-server crond'"
+```
+
+Note the `vm/<VM_NAME>` target form (bare `<VM_NAME>` fails) and that `--local-ssh` is not a valid flag on this virtctl version — host-key checking must be disabled via `--local-ssh-opts` instead.
+
 ---
 
 ## Phase 1 — Understand the Test Request
@@ -105,11 +117,26 @@ If either fails, ask the user for correct kubeconfig paths or bastion access met
 
 ### 2b. Existing VMs — ALWAYS CHECK FIRST
 
+The namespace can hold hundreds of VMs — use `discover-vms.sh`'s filter flags instead of raw `kubectl`/`jq` so counts and candidate lookups run as a single scoped query, not an unbounded dump into the conversation:
+
 ```bash
-ssh <BASTION_SSH> 'KUBECONFIG=<BASTION_SOURCE_KC> kubectl get vmi -n <NAMESPACE> --no-headers 2>/dev/null'
+# Count only (namespace-wide, no table)
+ssh <BASTION_SSH> 'cd <BASTION_REPO> && make discover-vms COUNT_ONLY=1'
+
+# Count of currently-Running VMs, optionally by OS
+ssh <BASTION_SSH> 'cd <BASTION_REPO> && make discover-vms COUNT_ONLY=1 PHASE=Running'
+ssh <BASTION_SSH> 'cd <BASTION_REPO> && make discover-vms COUNT_ONLY=1 PHASE=Running OS=fedora'
 ```
 
 Count the Running VMs. **Never run density-setup or density-teardown without checking first.** If enough Running VMs already exist for the test, skip density-setup entirely and use the existing VMs. Only run density-setup if there are zero VMs or not enough for the requested test. Never run density-teardown before a re-run — just clean migration CRs (`make clean-migrations`) if needed.
+
+When picking a specific candidate VM (e.g. one not already migrated), use `NOT_MIGRATED=1` rather than hand-rolling a `comm` diff — it only counts VMs that currently have a source VMI and no VMI yet on target (excludes stopped/orphaned VMs with no source VMI, which aren't valid candidates):
+
+```bash
+ssh <BASTION_SSH> 'cd <BASTION_REPO> && make discover-vms NOT_MIGRATED=1 OS=fedora' | head -6
+```
+
+`density-status.sh` supports the same `COUNT_ONLY`/`OS`/`PHASE` flags (via `make density-status ...`) when you need source-cluster node/IP detail instead of the migration-eligibility view `discover-vms` gives.
 
 ### 2c. Forklift readiness
 
@@ -370,7 +397,7 @@ If injection was NOT confirmed, warn the user and suggest debugging steps. Do no
 
 ### 7a. Collect raw data
 
-Prometheus dumps are raw time-series JSON (~15KB per file, 3 files per VM) — always reduce to aggregates with `jq`, never `cat` them whole. Component logs are almost always clean on a passing run — grep for problems first and only pull a full tail when something matches.
+Prometheus dumps are raw time-series JSON (~15KB per file, 3 files per VM) — always reduce to aggregates with `jq`, never `cat` them whole. `post-migration-*.json` can also balloon into multiple MB (its `large_data_validation` field embeds full large-file dumps) — always jq-filter it to the fields analysis actually uses, never `cat`/pretty-print it whole; a raw dump can blow past tool-output limits and waste a full round trip. Component logs are almost always clean on a passing run — grep for problems first and only pull a full tail when something matches.
 
 ```bash
 # Latest report directory
@@ -380,7 +407,9 @@ LATEST=$(ssh <BASTION_SSH> 'ls -td <BASTION_REPO>/reports/run-* 2>/dev/null | he
 ssh <BASTION_SSH> "cat $LATEST/summary.json"
 ssh <BASTION_SSH> "cat $LATEST/<VM_NAME>/migration-metrics-*.json"
 ssh <BASTION_SSH> "cat $LATEST/<VM_NAME>/pre-migration-*.json"
-ssh <BASTION_SSH> "cat $LATEST/<VM_NAME>/post-migration-*.json 2>/dev/null"
+
+# post-migration-*.json can be several MB (large_data_validation embeds full file dumps) — jq down to what's needed
+ssh <BASTION_SSH> "jq '{verdict, vm_info, comparison, cluster}' $LATEST/<VM_NAME>/post-migration-*.json 2>/dev/null"
 
 # Prometheus metrics (pre/during/post): extract min/max/avg per metric instead of the raw time series
 for PHASE in pre during post; do

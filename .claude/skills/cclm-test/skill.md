@@ -159,7 +159,7 @@ grep -q 'krknctl' cclm-chaos/scenarios/<ID>/chaos-trigger.sh && echo "uses krknc
 Skip this step only if that grep says "direct injection". For krknctl-based scenarios:
 
 ```bash
-ssh <BASTION_SSH> 'which krknctl 2>/dev/null && krknctl version 2>/dev/null || echo "krknctl not found"'
+ssh <BASTION_SSH> 'which krknctl 2>/dev/null && krknctl --help >/dev/null 2>&1 && echo "krknctl OK" || echo "krknctl not found"'
 ssh <BASTION_SSH> 'systemctl is-active podman.socket 2>/dev/null || echo "podman socket inactive"'
 ```
 
@@ -227,8 +227,8 @@ ssh <BASTION_SSH> 'cd <BASTION_REPO> && make clean-migrations MIGRATION_PROFILE=
 Resolve real node names and pod names for the chaos target:
 
 ```bash
-# VM's source node
-ssh <BASTION_SSH> 'KUBECONFIG=<BASTION_SOURCE_KC> kubectl get vmi <VM_NAME> -n <NAMESPACE> -o jsonpath="{.status.nodeName}"'
+# VM's source node (use CLUSTER=target for target-side scenarios)
+ssh <BASTION_SSH> 'cd <BASTION_REPO> && make vm-node VM=<VM_NAME>'
 
 # VM's pod name (for pod-kill scenarios)
 ssh <BASTION_SSH> 'KUBECONFIG=<BASTION_SOURCE_KC> kubectl get pods -n <NAMESPACE> -l "kubevirt.io/vm=<VM_NAME>" -o jsonpath="{.items[0].metadata.name}"'
@@ -318,9 +318,11 @@ The execution order depends on the **trigger gate in the scenario spec**, not th
 
 **CRITICAL: Always use separate SSH sessions** — never combine chaos trigger + migration in a single compound SSH command (subshell/backgrounding causes make to fail):
 
+**Redirect stdin too, not just stdout/stderr.** `nohup cmd > log 2>&1 &` without `< /dev/null` leaves the backgrounded process holding the SSH session's pty open, so the outer `ssh` call itself hangs until the tool's timeout fires and auto-backgrounds it — wasting a full timeout wait for something that should return in under a second.
+
 ```bash
 # Session 1: chaos trigger in background via nohup
-ssh <BASTION_SSH> 'cd <BASTION_REPO> && nohup bash cclm-chaos/scenarios/<ID>/chaos-trigger.sh <VM_NAME> <LATENCY> > /tmp/chaos-<VM_NAME>.log 2>&1 &'
+ssh <BASTION_SSH> 'cd <BASTION_REPO> && nohup bash cclm-chaos/scenarios/<ID>/chaos-trigger.sh <VM_NAME> <LATENCY> < /dev/null > /tmp/chaos-<VM_NAME>.log 2>&1 &'
 
 # Session 2: migration (separate SSH call)
 ssh <BASTION_SSH> 'cd <BASTION_REPO> && make migrate-selective VMS=<VM_NAME> MIGRATION_PROFILE=<MIGRATION_PROFILE> RUN_TAG=<tag>-<YYYYMMDDTHHMMSSZ>'

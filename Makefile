@@ -697,6 +697,22 @@ endif
 	@echo "=== TARGET ==="
 	@KUBECONFIG=$(TARGET_KUBECONFIG) kubectl get vm,vmi $(VM) -n $(NAMESPACE) 2>/dev/null || echo "Not found"
 
+vm-node: ## Show the node hosting a VM's virt-launcher pod (VM=name, CLUSTER=source|target)
+ifndef VM
+	$(error Specify VM=vm-name)
+endif
+	@if [[ "$(CLUSTER)" == "target" ]]; then KC=$(TARGET_KUBECONFIG); else KC=$(SOURCE_KUBECONFIG); fi; \
+	NODE=$$(KUBECONFIG=$$KC kubectl get pods -n $(NAMESPACE) -l "kubevirt.io/vm=$(VM)" -o jsonpath='{.items[0].spec.nodeName}' 2>/dev/null); \
+	if [[ -z "$$NODE" ]]; then \
+		echo "No virt-launcher pod found for VM=$(VM) on $(if $(filter target,$(CLUSTER)),target,source)" >&2; exit 1; \
+	fi; \
+	echo "$$NODE"
+
+vmim-status: ## Show jq-filtered VMIM status (VM=name to filter, else all VMIMs; CLUSTER=source|target, default source)
+	@if [[ "$(CLUSTER)" == "target" ]]; then KC=$(TARGET_KUBECONFIG); else KC=$(SOURCE_KUBECONFIG); fi; \
+	KUBECONFIG=$$KC kubectl get vmim -n $(NAMESPACE) -o json 2>/dev/null | \
+		jq --arg vm "$(VM)" '.items | map(select($$vm == "" or .spec.vmiName == $$vm)) | map({name: .metadata.name, vmiName: .spec.vmiName, phase: .status.phase, failureReason: .status.migrationState.failureReason, startTimestamp: .status.migrationState.startTimestamp, endTimestamp: .status.migrationState.endTimestamp, sourceNode: .status.migrationState.sourceNode, targetNode: .status.migrationState.targetNode})'
+
 # ═══════════════════════════════════════════════════════════════
 #  Cleanup
 # ═══════════════════════════════════════════════════════════════

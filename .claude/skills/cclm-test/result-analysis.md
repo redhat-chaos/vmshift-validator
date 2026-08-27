@@ -49,6 +49,16 @@ Look for these patterns:
 - **Performance regression**: Duration >3x baseline without obvious cause
 - **Unexpected cold fallback**: Cold migration when live was expected (no fault should have forced cold)
 
+## 7e-note. Inspecting VMIM objects — always jq-filter, never raw YAML
+
+`oc get vmim -o yaml` embeds `status.migrationState.sourceState.nodeSelectors` / `targetState` — a map of 100+ per-CPU host-model feature flags (`vmx-ept`, `avx512bitalg`, `host-model-required-features.node.kubevirt.io/...`) that adds no analytical value and can blow a single VMIM past 30KB. Use `make vmim-status VM=<VM_NAME>` (optionally `CLUSTER=target`), which already jq-filters to `name, vmiName, phase, failureReason, startTimestamp, endTimestamp, sourceNode, targetNode`:
+
+```bash
+ssh <BASTION_SSH> 'cd <BASTION_REPO> && make vmim-status VM=<VM_NAME>'
+```
+
+**Forklift `Migration` CR resource name:** don't guess the API resource name ad hoc (`migration.forklift.konveyor.io` fails discovery as a singular). Reuse the exact invocation the pipeline scripts already use — `scripts/migrate-single-vm.sh` calls `kubectl_migration get migration "${VM_NAME}-migration" -n "$MTV_NAMESPACE" ...` (bare `migration` short name via the `kubectl_migration` executor wrapper). Grep the script for the working form rather than trial-and-error against the live cluster.
+
 ## 7f. Cross-reference with scenario spec
 
 Compare the actual outcome against the scenario's **success criteria** and **failure signals**. Determine:

@@ -502,15 +502,13 @@ render-mixed-config: ## Generate mixed-workload kube-burner config from per-type
 		--namespace $(NAMESPACE) \
 		> "$(KUBE_BURNER_DIR)/vm-mixed.yml"
 
+# For Windows VMs the OOBE sysprep secret must be mirrored into NAMESPACE
+# *while* kube-burner runs, because kube-burner recreates the namespace and
+# wipes any pre-copied secret. density-setup.sh handles this via a background
+# mirror loop when --win-oobe-secret/--win-golden-namespace are passed.
+_IS_WINDOWS := $(if $(WIN_VMS),1,$(shell echo "$(KUBE_BURNER_CONFIG)" | grep -qi windows && echo 1))
+
 density-setup: $(if $(_HAS_MIX),render-mixed-config) render-config ## Run kube-burner and stabilize workloads
-	@if echo "$(KUBE_BURNER_CONFIG)" | grep -qi windows || [[ -n "$(WIN_VMS)" ]]; then \
-		if ! KUBECONFIG=$(SOURCE_KUBECONFIG) kubectl get secret $(WIN_OOBE_SECRET) -n $(NAMESPACE) >/dev/null 2>&1; then \
-			echo "Copying Windows OOBE secret $(WIN_OOBE_SECRET) from $(WIN_GOLDEN_NAMESPACE) to $(NAMESPACE)..."; \
-			KUBECONFIG=$(SOURCE_KUBECONFIG) kubectl get secret $(WIN_OOBE_SECRET) -n $(WIN_GOLDEN_NAMESPACE) -o json \
-				| python3 -c "import sys,json; s=json.load(sys.stdin); s['metadata']={'name':s['metadata']['name'],'namespace':'$(NAMESPACE)'}; print(json.dumps(s))" \
-				| KUBECONFIG=$(SOURCE_KUBECONFIG) kubectl apply -f -; \
-		fi; \
-	fi
 	@LOG_LEVEL=$(LOG_LEVEL) GA_READY_TIMEOUT=$(GA_READY_TIMEOUT) GA_READY_INTERVAL=$(GA_READY_INTERVAL) $(SCRIPTS_DIR)/density-setup.sh \
 		--kubeconfig $(SOURCE_KUBECONFIG) \
 		--config $(RENDERED_CONFIG) \
@@ -521,6 +519,7 @@ density-setup: $(if $(_HAS_MIX),render-mixed-config) render-config ## Run kube-b
 		--label-selector $(VM_LABEL_SELECTOR) \
 		--stabilize-wait $(STABILIZE_WAIT) \
 		--ssh-ready-timeout $(SSH_READY_TIMEOUT) \
+		$(if $(_IS_WINDOWS),--win-oobe-secret $(WIN_OOBE_SECRET) --win-golden-namespace $(WIN_GOLDEN_NAMESPACE),) \
 		$(if $(LOCAL_SSH_OPTS),--local-ssh-opts "$(LOCAL_SSH_OPTS)",)
 
 density-status: ## Show density VM status on source cluster

@@ -209,55 +209,16 @@ For infrastructure targets (gateway nodes, forklift-controller, etc.), resolve t
 
 ### 3d. Determine chaos injection method — existing script is always first priority
 
-**Never hand-build a chaos command as a first resort.** Every scenario directory already has working script(s) — use them, in this escalation order, and only fall back to step 5 after steps 1–4 are genuinely exhausted:
+**Read `.claude/skills/cclm-test/chaos-injection-methods.md` before executing step 2 below or diagnosing a failed script.** It contains the full detail for each step, including the merged-kubeconfig/`--context` fix.
 
-**1. Identify and use the scenario's own script(s).** In order of preference:
-   - `chaos-sweep.sh`, if the user asked for a sweep (multiple iterations/values — see Phase 5c)
-   - `chaos-trigger.sh` — the default single-iteration entry point
-   - Any other top-level `*.sh` in the scenario dir (e.g. `a1-multi-phase-test.sh`) if the requested variant isn't covered by `chaos-trigger.sh` — ask the user which to use if it's ambiguous
+**Never hand-build a chaos command as a first resort.** Escalation order:
+1. Use the scenario's own script (`chaos-sweep.sh` for sweeps, else `chaos-trigger.sh`, else another top-level `*.sh`) — the script is authoritative, not scenario-spec.md prose.
+2. Resolve and pass its real args/env for this run rather than trusting defaults. **Key gotcha (always apply):** any `--trigger-command` that checks cluster state needs a merged kubeconfig + `--context`, not a second `--kubeconfig` — otherwise it silently never satisfies (times out, skips chaos, no error).
+3. If it fails, cross-check kubeconfig/node/label values against the live cluster and retry once.
+4. If it still fails, check `gh issue list --repo krkn-chaos/<krknctl|krkn|krkn-hub> --search "<symptom>"` before working around it.
+5. Only after 1–4 are exhausted, fall back to a manual workaround — tell the user you're deviating and treat it as a plan change requiring Phase 4 confirmation.
 
-   The script itself is authoritative, not the scenario-spec.md prose — "Automation"/"Primary tooling" fields in the spec can be stale. Re-derive the actual method by reading the script and grepping it:
-   ```bash
-   grep -q 'krknctl' cclm-chaos/scenarios/<ID>/chaos-trigger.sh && echo "uses krknctl" || echo "direct injection"
-   ```
-
-**2. Before running it, resolve and pass its arguments for *this* run.** These scripts are written to take args/env vars rather than hardcode values — read the script's usage/arg-parsing before invoking it, then pass this run's real values explicitly rather than trusting the script's own defaults:
-   - VM name, source node (from 3c), `<NAMESPACE>`, `<BASTION_SOURCE_KC>` / `<BASTION_TARGET_KC>` (from env.yaml)
-   - Watch for scripts or krknctl invocations that default to a *different* kubeconfig than the standard one (e.g. a node-IP-based kubeconfig for krknctl like `/root/krknctl-kc/blue-ip-kubeconfig`) — verify that path actually exists on the bastion before relying on it; override via the script's own KUBECONFIG env var/arg if it doesn't match this environment
-   - If any value the script defaults to (kubeconfig, pod label, namespace) doesn't match what you resolved in Phase 2/3c, override it via args/env — don't edit the script
-
-   **Multi-cluster trigger-commands need a merged kubeconfig with `--context`, not a second `--kubeconfig`.** A `--trigger-command` passed to `krknctl run` executes *inside the scenario's podman container*, which only has access to whatever file was mounted via krknctl's own top-level `--kubeconfig` flag. If the trigger-command's own `oc`/`kubectl` call hardcodes a *different* `--kubeconfig` path — a host path like `/root/blue/kubeconfig`, or anything resolving to the lab's hostname-based API URL (DNS doesn't resolve inside the container) — it silently fails on every single poll. krknctl treats a failing command the same as "not yet satisfied," so this produces **no error at all**: the trigger just times out (`--triggers-timeout`) and skips the chaos (`--triggers-on-timeout skip`) with zero visible sign anything was wrong. Confirmed on both A1 (pod-kill trigger checking source VMIM) and B1 (netem trigger checking target VMIM) — this applies whenever a trigger-command needs to check live cluster state, whether that's the same cluster the action targets or a different one:
-
-   1. Build one IP-substituted kubeconfig with **both** contexts (check for an existing one first, e.g. `/root/krknctl-kc/merged-ip-kubeconfig` — reuse it rather than rebuilding):
-      ```bash
-      KUBECONFIG="$BLUE_IP_KUBECONFIG:$GREEN_IP_KUBECONFIG" kubectl config view --flatten > "$MERGED_KUBECONFIG"
-      ```
-      Order matters: `kubectl config view --flatten` keeps the *first* file's `current-context` as the merged file's default context. List whichever cluster the main krknctl **action** (not the trigger) needs to target first, so the action still hits the right cluster with no extra flag needed.
-   2. Pass `$MERGED_KUBECONFIG` — not a single-cluster IP kubeconfig — to krknctl's own top-level `--kubeconfig`.
-   3. In the `--trigger-command` itself, drop any `--kubeconfig` flag and use `--context <name>` instead, resolved once via `kubectl config current-context` against the single-cluster IP kubeconfig for whichever side the trigger needs to query:
-      ```bash
-      BLUE_CONTEXT="$(KUBECONFIG=$BLUE_IP_KUBECONFIG kubectl config current-context)"
-      GREEN_CONTEXT="$(KUBECONFIG=$GREEN_IP_KUBECONFIG kubectl config current-context)"
-      ```
-
-   If a chaos-trigger.sh's trigger-command never seems to satisfy despite the underlying condition being independently confirmed true (e.g. VMIM really is `Running` per a manual poll run outside krknctl), suspect this exact bug before anything else — check what kubeconfig/context the trigger-command actually uses.
-
-**3. If the script fails, diagnose before abandoning it:**
-   - Cross-check the exact values used (kubeconfig paths, node name, pod label/selector, namespace) against the live cluster — a stale node name or wrong kubeconfig is the most common cause
-   - Re-check Phase 2d/2e preconditions (krknctl installed + correct version, podman socket active, any kubeconfig file the script/krknctl references actually present on the bastion)
-   - Fix the specific broken input and retry the same script — one fix-and-retry cycle before escalating further
-
-**4. If it still fails, check upstream before working around it.** Use `gh` against the krkn-chaos GitHub org to check for known issues, flag changes, or documented behavior:
-   ```bash
-   gh issue list --repo krkn-chaos/krknctl --search "<symptom>"
-   gh issue list --repo krkn-chaos/krkn --search "<symptom>"
-   gh issue list --repo krkn-chaos/krkn-hub --search "<symptom>"
-   ```
-   Also verify current flag/usage syntax on the bastion (`krknctl describe pod-scenarios`, etc.) in case the script predates a krknctl version change.
-
-**5. Only after 1–4 are exhausted, fall back to a workaround** — e.g. the scenario spec's "Manual (alternative)" direct-injection commands, or an equivalent hand-built command. Tell the user you're deviating from the documented script, explain what failed and what you tried, and treat this as a plan change requiring the same Phase 4 confirmation as the original.
-
-For krknctl-based scenarios where you need to design a genuinely new scenario (not troubleshoot an existing one), invoke the `/krkn-scenario` skill instead of hand-building flags.
+For krknctl-based scenarios needing a genuinely new scenario (not troubleshooting), invoke `/krkn-scenario` instead of hand-building flags.
 
 ### 3e. Determine iteration number
 
@@ -343,50 +304,7 @@ Watch both processes. The migration typically takes 60–120s. Report progress t
 
 ### 5c. Sweep execution (when user requests multiple iterations)
 
-When the user asks for a sweep (multiple latency values, multiple VMs, multiple iterations), use the `chaos-sweep.sh` orchestrator instead of running individual tests:
-
-1. **Create a YAML iteration file** under `cclm-chaos/scenarios/<ID>/iterations-<name>.yaml`. Reference existing examples:
-   - `cclm-chaos/scenarios/B1/iterations-brex-4vm-latency-sweep.yaml` (br-ex latency levels, mixed Fedora+Windows)
-   - `cclm-chaos/scenarios/B1/iterations-brmig-4vm-latency-sweep.yaml` (br-migration latency levels, mixed Fedora+Windows)
-   - `cclm-chaos/scenarios/B2/iterations-brex-4vm-loss-sweep.yaml` (br-ex packet-loss levels, mixed Fedora+Windows)
-   - `cclm-chaos/scenarios/B2/iterations-brmig-4vm-loss-sweep.yaml` (br-migration packet-loss levels, mixed Fedora+Windows)
-
-2. **Dry-run first** to verify the iteration plan:
-   ```bash
-   ssh <BASTION_SSH> 'cd <BASTION_REPO> && bash cclm-chaos/scenarios/B1/chaos-sweep.sh -f <yaml-file> --dry-run'
-   ```
-
-3. **Execute the sweep:**
-   ```bash
-   ssh <BASTION_SSH> 'cd <BASTION_REPO> && bash cclm-chaos/scenarios/B1/chaos-sweep.sh -f <yaml-file>'
-   ```
-
-4. **Resume from a specific iteration** if the sweep was interrupted:
-   ```bash
-   ssh <BASTION_SSH> 'cd <BASTION_REPO> && bash cclm-chaos/scenarios/B1/chaos-sweep.sh -f <yaml-file> --start-from <tag>'
-   ```
-
-The sweep runner handles per-iteration: chaos start → migration → chaos cleanup/netem clear → post-checks → result collection → cooldown → next iteration.
-
-**YAML iteration file structure:**
-```yaml
-sweep_name: "<name>"
-defaults:
-  chaos_trigger: chaos-trigger.sh    # which script to use
-  trigger_mode: vmim-running         # or before-migration
-  chaos_duration: 300
-  cooldown_s: 60
-  all_workers: true
-  migration_profile: baremetal-l2
-iterations:
-  - tag: baseline-0ms
-    latency: "0ms"
-    skip_chaos: true                 # baseline — no fault injection
-    vms: [vm-svc-xxx-1]
-  - tag: 10ms-1vm
-    latency: "10ms"
-    vms: [vm-svc-xxx-2]
-```
+When the user asks for a sweep (multiple latency values, multiple VMs, multiple iterations), **read `.claude/skills/cclm-test/sweep-execution.md`** — it covers the `chaos-sweep.sh` orchestrator, the YAML iteration file format (with existing examples to reference), dry-run/execute/resume usage, and the sweep report format (Phase 8d).
 
 ---
 
@@ -494,60 +412,9 @@ Determine:
    - File-writer line count reset
 3. **Migration type matters** — For A-series pod kills, cold fallback is expected and valid. For B-series network chaos, live migration may slow down but should still complete live.
 
-### 7c. Performance / timing analysis
+### 7c–7f. Performance, data integrity, issue detection, spec cross-reference
 
-Compare against baseline expectations:
-
-| Metric | Baseline (no chaos) | This run | Status |
-|--------|---------------------|----------|--------|
-| Forklift total duration | 35–50s | <actual>s | Normal / Degraded / Severely degraded |
-| Initialize step | ~0s | <actual>s | |
-| PrepareTarget step | 15–20s | <actual>s | |
-| Synchronization step | 20–30s | <actual>s | (this is where chaos impact shows) |
-
-Also check from `migration-metrics-*.json`:
-- `transfer_stats.memory_bandwidth` — baseline ~3.7 GiB/s
-- `transfer_stats.total_downtime_ms` — baseline ~60ms
-- `transfer_stats.data_processed` — typically ~420–440 MiB for 512Mi Fedora VM
-
-Reference baseline data from prior sweep reports if available.
-
-**Grading scale:**
-- **Normal**: duration < 1.5x baseline
-- **Degraded**: 1.5x – 3x baseline
-- **Severely degraded**: > 3x baseline
-
-### 7d. Data integrity analysis
-
-If migration succeeded:
-
-| Check | Pre | Post | Result |
-|-------|-----|------|--------|
-| File-writer lines | <pre> | <post> | PASS (post >= pre) / FAIL |
-| SQLite rows | <pre> | <post> | PASS (post >= pre) / FAIL |
-| File SHA match | <pre_sha> | <post_sha> | PASS (prefix match) / FAIL |
-| HTTP :8080 | <pre> | <post> | PASS / FAIL |
-| Services running | <list> | <list> | PASS (all present) / FAIL |
-
-### 7e. Issue detection
-
-Look for these patterns:
-
-- **Split-brain**: VM running on both clusters simultaneously (critical bug)
-- **Stuck VMIM**: Migration in Running phase past 5 minutes with no progress
-- **Silent failure**: Migration reports Succeeded but VM is unreachable
-- **Data loss**: SQLite rows decreased, file SHAs don't match
-- **Process loss**: Services not running post-migration (may be expected for cold fallback)
-- **Performance regression**: Duration >3x baseline without obvious cause
-- **Unexpected cold fallback**: Cold migration when live was expected (no fault should have forced cold)
-
-### 7f. Cross-reference with scenario spec
-
-Compare the actual outcome against the scenario's **success criteria** and **failure signals**. Determine:
-
-- Did the system behave as expected given the fault?
-- Were there any unexpected behaviors?
-- Does this match or contradict findings from previous iterations?
+**Read `.claude/skills/cclm-test/result-analysis.md` before writing the Phase 8a summary.** It covers, using the data collected in 7a/7b: the performance/timing grading scale (Normal / Degraded / Severely degraded vs baseline), the data integrity table (file-writer lines, SQLite rows, SHA match, HTTP, services), issue-detection patterns (split-brain, stuck VMIM, silent failure, data loss, unexpected cold fallback), and cross-referencing the outcome against the scenario's success/failure criteria.
 
 ---
 
@@ -620,37 +487,14 @@ After presenting results, offer:
 
 ### 8d. Sweep report (when a sweep was executed)
 
-When a sweep completes (Phase 5c), collect sweep-level artifacts:
-
-```bash
-# Sweep results and summary
-ssh <BASTION_SSH> "cat cclm-chaos/scenarios/<ID>/reports/sweep-results-*.log"
-ssh <BASTION_SSH> "cat cclm-chaos/scenarios/<ID>/reports/sweep-summary-*.json"
-
-# Per-iteration reports are in separate report directories
-ssh <BASTION_SSH> 'ls -d <BASTION_REPO>/reports/run-<sweep-name>-*/'
-```
-
-Generate a comprehensive sweep report (saved to `cclm-chaos/scenarios/<ID>/reports/<sweep-name>-report-<YYYYMMDD>.md`) covering:
-
-- Infrastructure details (OCP version, CNV version, MTV version, hardware)
-- Network architecture and VLAN setup
-- Per-iteration results table (duration, bandwidth, downtime, verdict)
-- Performance degradation curve analysis
-- Data integrity analysis across all iterations
-- Prometheus telemetry analysis
-- Log anomaly analysis (scan all component logs for errors)
-- Customer recommendations with thresholds
-- Metrics reference (what to measure, how to measure, alert thresholds)
-
-Reference example: `cclm-chaos/scenarios/B1/reports/b1-event-driven-sweep-report-20260724.md`
+When a sweep completes (Phase 5c), see `.claude/skills/cclm-test/sweep-execution.md` for how to collect sweep-level artifacts and the full sweep report structure (infra details, per-iteration table, degradation curve, integrity/telemetry/log analysis, recommendations).
 
 ### 8e. Clean/Final report (consolidated scenario report)
 
-When the user asks for a **clean report**, **final report**, or **consolidated report** covering all iterations of a scenario, use the standardized 12-section template defined in `.claude/skills/cclm-test/report-guidelines.md`.
+When the user asks for a **clean report**, **final report**, or **consolidated report** covering all iterations of a scenario, use the standardized 14-section template defined in `.claude/skills/cclm-test/report-guidelines.md`.
 
 **Read that file first** before writing any consolidated report. It contains:
-- The exact 12-section template (section numbers and titles must match verbatim)
+- The exact 14-section template (section numbers and titles must match verbatim)
 - Quality rules (no cross-scenario references, clean data only, content boundaries)
 - Environment info standards (hardware specs, baselines, version lookup)
 - Classification criteria (PASS / FAIL / PARTIAL PASS / NOT APPLICABLE / PENDING RERUN)
@@ -692,62 +536,17 @@ When a test run reveals a new defect (or re-confirms an existing one), create a 
 
 ## Error Handling
 
-### Bastion unreachable
+**Read `.claude/skills/cclm-test/error-handling.md` for remediation steps once you hit one of these:**
 
-If `ssh <BASTION_SSH>` fails:
-- Ask: "I can't reach the bastion via `ssh <BASTION_SSH>`. Is there a different SSH alias or host? Do you need to connect to a VPN first?"
-
-### Cluster unreachable from bastion
-
-If kubectl commands fail on the bastion:
-- Check kubeconfig paths: `ssh <BASTION_SSH> 'ls -la <BASTION_SOURCE_KC> <BASTION_TARGET_KC>'`
-- Ask: "The kubeconfig at `<BASTION_SOURCE_KC>` doesn't seem to work. Are the clusters up? Have the kubeconfigs been refreshed?"
-
-### Kubeconfig expired
-
-If cluster commands return "the server has asked for the client to provide credentials" or "Unauthorized":
-- Run reauth on the bastion: `ssh <BASTION_SSH> 'cd <BASTION_REPO> && make reauth-blue'` and/or `make reauth-green`
-- These run `oc login` to refresh the kubeconfig tokens
-- After reauth, re-verify cluster connectivity (Phase 2a)
-
-### No VMs available
-
-If discover-vms returns empty:
-- Offer to run density-setup: "No VMs found. Should I run `make density-setup` to create them?"
-- For mixed workloads: `make density-setup FEDORA_VMS=40 WIN_VMS=20 LOG_LEVEL=2`
-
-### Density-setup failures
-
-If density-setup fails or VMs get stuck, consult the detailed troubleshooting guide at `infra/cloud29/density-setup-troubleshooting.md`. Common issues:
-
-- **NFS CSI controller can't provision PVCs** — Restart the CSI controller pod: `kubectl delete pod -n kube-system -l app=csi-nfs-controller`
-- **Node-level NFS mount failures** (VMs stuck in `Starting`, pods in `Init:0/3`) — Cordon affected nodes, restart stuck VMs via `virtctl restart`, then uncordon
-- **Windows sysprep secret missing** (`FailedMount: secret "win2022-oobe-unattend" not found`) — kube-burner's `cleanup: true` deletes the namespace and pre-copied secret. Re-copy: `kubectl get secret win2022-oobe-unattend -n windows-golden-images -o json | python3 -c "..." | kubectl apply -f -`
-- **Stuck kube-burner process** — Kill with `pkill -f "kube-burner|density-setup"`, clean up VMs, then retry
-- **Windows VM stabilization WARN** (rows=0) — Usually a timing issue; VMs are Running and workloads will stabilize within 5-10 minutes. Safe to proceed with migration.
-
-### Chaos-trigger.sh missing
-
-If the scenario doesn't have a chaos-trigger.sh:
-- Check automation level in scenario-spec.md
-- If Manual: tell the user they need to inject manually and offer to set up everything else
-- If the scenario doesn't exist at all: offer to help create a new scenario spec
-
-### Migration timeout
-
-If migration exceeds 10 minutes:
-- Show current status: `ssh <BASTION_SSH> 'KUBECONFIG=<BASTION_TARGET_KC> kubectl get migration -n <MTV_NAMESPACE> -o wide'`
-- Offer to wait longer or cancel
-
-### krknctl fails
-
-- Follow the escalation order in Phase 3d step 3–4: re-check kubeconfig/node/label values first, retry, then check `gh issue list --repo krkn-chaos/krknctl --search "<symptom>"` before falling back to a manual workaround
-- Common issue: GLIBC incompatibility — suggest using v0.10.21
-- Common issue: podman socket not enabled
-
-### Trigger never satisfies (chaos silently skipped after full timeout)
-
-If `krknctl` logs "not satisfied" once and then goes silent for the entire `--triggers-timeout`, with no chaos ever applied and no error — this is almost always the multi-cluster kubeconfig bug in Phase 3d step 2, not a real timing miss. The trigger-command's `oc`/`kubectl` call can't reach the cluster it's checking from inside krknctl's container (wrong kubeconfig path, or a hostname URL that doesn't resolve there). Fix with the merged-kubeconfig + `--context` pattern in Phase 3d step 2, then re-verify by independently polling the same condition outside krknctl to confirm it really was true during the window the trigger missed.
+- Bastion unreachable via `ssh <BASTION_SSH>`
+- Cluster unreachable from bastion (kubectl commands fail)
+- Kubeconfig expired ("Unauthorized" / "server has asked for the client to provide credentials")
+- No VMs available (discover-vms returns empty)
+- Density-setup failures or stuck VMs (NFS/PVC issues, Windows sysprep secret missing, stuck kube-burner process, Windows stabilization WARN)
+- Chaos-trigger.sh missing for the scenario
+- Migration timeout (exceeds 10 minutes)
+- krknctl fails (GLIBC incompatibility, podman socket not enabled)
+- Trigger never satisfies (chaos silently skipped after full `--triggers-timeout`, no error) — almost always the merged-kubeconfig bug, see `chaos-injection-methods.md`
 
 ---
 
@@ -760,8 +559,8 @@ If `krknctl` logs "not satisfied" once and then goes silent for the entire `--tr
 5. **`RUN_TAG` always has a timestamp postfix** — `<ID>-iteration<N>-<YYYYMMDDTHHMMSSZ>` (or `<tag>-<YYYYMMDDTHHMMSSZ>`), never bare. Prevents ambiguity/collisions when the same iteration is retried.
 6. **Never execute chaos without user confirmation** (Phase 4 is mandatory).
 7. **Verify injection happened** (Phase 6 is mandatory) — don't assume the command working means chaos was injected.
-8. **Existing scenario scripts are first priority, always** (`chaos-trigger.sh`/`chaos-sweep.sh`/scenario `*.sh`) — pass this run's real args/env rather than trusting script defaults; diagnose and retry on failure; check upstream krkn-chaos repos via `gh` before falling back to a manual workaround (see Phase 3d).
+8. **Existing scenario scripts are first priority, always** (`chaos-trigger.sh`/`chaos-sweep.sh`/scenario `*.sh`) — pass this run's real args/env rather than trusting script defaults; diagnose and retry on failure; check upstream krkn-chaos repos via `gh` before falling back to a manual workaround (see `chaos-injection-methods.md`).
 9. **Failed migrations are valid results** — collect and analyze them fully.
 10. **Ask questions when unsure** — it's better to ask than to guess wrong and waste a test run.
 11. **Report honestly** — if chaos wasn't confirmed or results are ambiguous, say so clearly.
-12. **Any trigger-command that checks cluster state needs the merged-kubeconfig + `--context` pattern** (Phase 3d step 2), not a second `--kubeconfig` path — this applies whether it checks the same cluster the action targets or a different one. A silently-never-satisfied trigger (timeout, no chaos, no error) is the signature of getting this wrong.
+12. **Any trigger-command that checks cluster state needs the merged-kubeconfig + `--context` pattern** (see `chaos-injection-methods.md`), not a second `--kubeconfig` path — this applies whether it checks the same cluster the action targets or a different one. A silently-never-satisfied trigger (timeout, no chaos, no error) is the signature of getting this wrong.

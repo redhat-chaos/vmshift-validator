@@ -613,6 +613,27 @@ report: ## Show latest migration summary
 list-reports: ## List all report runs
 	@ls -lt $(REPORTS_DIR)/run-* 2>/dev/null || echo "No reports found."
 
+vm-report: ## Show jq-filtered report bundle for a VM (VM=name, TAG=run-tag-prefix optional, defaults to latest run overall)
+ifndef VM
+	$(error Specify VM=vm-name)
+endif
+	@if [[ -n "$(TAG)" ]]; then \
+		LATEST=$$(ls -td $(REPORTS_DIR)/run-$(TAG)-* 2>/dev/null | head -1); \
+	else \
+		LATEST=$$(ls -td $(REPORTS_DIR)/run-* 2>/dev/null | head -1); \
+	fi; \
+	if [[ -z "$$LATEST" ]]; then echo "No matching report dir found (TAG=$(TAG))" >&2; exit 1; fi; \
+	echo "Report dir: $$LATEST"; \
+	echo "=== summary.json ==="; \
+	jq . "$$LATEST/summary.json" 2>/dev/null || echo "(missing)"; \
+	echo "=== migration-metrics ==="; \
+	cat "$$LATEST/$(VM)"/migration-metrics-*.json 2>/dev/null || echo "(missing)"; \
+	echo ""; \
+	echo "=== pre-migration ==="; \
+	cat "$$LATEST/$(VM)"/pre-migration-*.json 2>/dev/null || echo "(missing)"; \
+	echo "=== post-migration (filtered) ==="; \
+	jq '{verdict, vm_info, comparison, cluster}' "$$LATEST/$(VM)"/post-migration-*.json 2>/dev/null || echo "(missing)"
+
 pull-reports: ## Pull reports from remote bastion to local machine
 	@./pull-reports.sh
 
@@ -712,6 +733,15 @@ vmim-status: ## Show jq-filtered VMIM status (VM=name to filter, else all VMIMs;
 	@if [[ "$(CLUSTER)" == "target" ]]; then KC=$(TARGET_KUBECONFIG); else KC=$(SOURCE_KUBECONFIG); fi; \
 	KUBECONFIG=$$KC kubectl get vmim -n $(NAMESPACE) -o json 2>/dev/null | \
 		jq --arg vm "$(VM)" '.items | map(select($$vm == "" or .spec.vmiName == $$vm)) | map({name: .metadata.name, vmiName: .spec.vmiName, phase: .status.phase, failureReason: .status.migrationState.failureReason, startTimestamp: .status.migrationState.startTimestamp, endTimestamp: .status.migrationState.endTimestamp, sourceNode: .status.migrationState.sourceNode, targetNode: .status.migrationState.targetNode})'
+
+migration-status: ## Show jq-filtered Forklift Migration CR conditions (VM=name). NOTE: Migration.status can show Succeeded even when the underlying VMIM failed -- always cross-check with `make vmim-status` too.
+ifndef VM
+	$(error Specify VM=vm-name)
+endif
+	$(eval FORKLIFT_KC := $(if $(filter target,$(MIGRATION_API)),$(TARGET_KUBECONFIG),$(SOURCE_KUBECONFIG)))
+	@KUBECONFIG=$(FORKLIFT_KC) kubectl get migration "$(VM)-migration" -n $(MTV_NAMESPACE) -o json 2>/dev/null | \
+		jq '{name: .metadata.name, started: .status.started, completed: .status.completed, conditions: .status.conditions, vms: [.status.vms[]? | {name, id, phase, error}]}' || \
+		echo "Migration CR $(VM)-migration not found in $(MTV_NAMESPACE) (checked $(if $(filter target,$(MIGRATION_API)),target,source) cluster, MIGRATION_API=$(MIGRATION_API))" >&2
 
 # ═══════════════════════════════════════════════════════════════
 #  Cleanup

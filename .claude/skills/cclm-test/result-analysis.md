@@ -43,7 +43,8 @@ Look for these patterns:
 
 - **Split-brain**: VM running on both clusters simultaneously (critical bug)
 - **Stuck VMIM**: Migration in Running phase past 5 minutes with no progress
-- **Silent failure**: Migration reports Succeeded but VM is unreachable
+- **Silent failure at the Forklift level**: the Forklift `Migration` CR's own `.status.conditions` (type `Succeeded`) and `.status.vms[].phase` (`Completed`) can read as full success even when the underlying KubeVirt VMIM independently failed seconds earlier (`.status.migrationState.failed: true` with a real `failureReason`). Confirmed reproducible on A3: Migration CR reported `Succeeded`/`Completed` while VMIM had `phase: Failed`. **Always cross-check `make migration-status VM=<VM_NAME>` against `make vmim-status VM=<VM_NAME>` — never trust the Migration CR's own success signal alone.** The pipeline's own FAIL verdict in `summary.json` may still be correct (it validates via post-migration SSH/guest checks, a separate signal), but don't assume the Migration CR agrees with it — check both explicitly and call out the discrepancy if found.
+- **Silent failure at the pipeline level**: Migration reports Succeeded but VM is unreachable
 - **Data loss**: SQLite rows decreased, file SHAs don't match
 - **Process loss**: Services not running post-migration (may be expected for cold fallback)
 - **Performance regression**: Duration >3x baseline without obvious cause
@@ -57,7 +58,13 @@ Look for these patterns:
 ssh <BASTION_SSH> 'cd <BASTION_REPO> && make vmim-status VM=<VM_NAME>'
 ```
 
-**Forklift `Migration` CR resource name:** don't guess the API resource name ad hoc (`migration.forklift.konveyor.io` fails discovery as a singular). Reuse the exact invocation the pipeline scripts already use — `scripts/migrate-single-vm.sh` calls `kubectl_migration get migration "${VM_NAME}-migration" -n "$MTV_NAMESPACE" ...` (bare `migration` short name via the `kubectl_migration` executor wrapper). Grep the script for the working form rather than trial-and-error against the live cluster.
+**Forklift `Migration` CR lives on whichever cluster `MIGRATION_API` points to, not always source.** `oc get migration <vm>-migration -n <MTV_NAMESPACE>` fails with "the server doesn't have a resource type migration" if you query the wrong cluster — the CRD simply isn't installed there. Check `profiles/<profile>.env` for `MIGRATION_API` (`source` or `target`) before guessing; on this lab's `baremetal-l2` profile it's `target` (Forklift runs on green). Use `make migration-status VM=<VM_NAME>`, which already resolves the correct cluster via `MIGRATION_API` and jq-filters to `conditions` + `vms[].{name, id, phase, error}`:
+
+```bash
+ssh <BASTION_SSH> 'cd <BASTION_REPO> && make migration-status VM=<VM_NAME>'
+```
+
+For the full jq-filtered report bundle (summary, migration-metrics, pre/post-migration) in one call instead of hand-composing the LATEST-report-dir lookup each time, use `make vm-report VM=<VM_NAME> [TAG=<run-tag-prefix>]` (TAG defaults to the globally latest run if omitted).
 
 ## 7f. Cross-reference with scenario spec
 

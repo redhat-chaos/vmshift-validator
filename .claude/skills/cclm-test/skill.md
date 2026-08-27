@@ -1,6 +1,6 @@
 ---
 skill: cclm-test
-model: opus
+model: sonnet
 description: >
   End-to-end CCLM chaos test runner: analyze cluster state, prepare and verify
   chaos injection with the user, execute migration + chaos, validate injection
@@ -366,37 +366,42 @@ If injection was NOT confirmed, warn the user and suggest debugging steps. Do no
 
 ## Phase 7 — Analyze Results
 
+**Model note:** 7a (below) is pure extraction and stays on the skill's default model. 7b–8f need real judgment — once 7a's condensed data is in hand, delegate to a subagent configured with `model: opus`, passing it only the condensed data (never raw JSON/logs), and use its output for the analysis/report. This keeps the expensive model reserved for the phases that actually need it.
+
 ### 7a. Collect raw data
+
+Prometheus dumps are raw time-series JSON (~15KB per file, 3 files per VM) — always reduce to aggregates with `jq`, never `cat` them whole. Component logs are almost always clean on a passing run — grep for problems first and only pull a full tail when something matches.
 
 ```bash
 # Latest report directory
 LATEST=$(ssh <BASTION_SSH> 'ls -td <BASTION_REPO>/reports/run-* 2>/dev/null | head -1')
 
-# Summary
+# Summary and per-VM metrics/baselines are small (1-3KB) — cat these directly
 ssh <BASTION_SSH> "cat $LATEST/summary.json"
-
-# Per-VM migration metrics
 ssh <BASTION_SSH> "cat $LATEST/<VM_NAME>/migration-metrics-*.json"
-
-# Pre-migration baseline
 ssh <BASTION_SSH> "cat $LATEST/<VM_NAME>/pre-migration-*.json"
-
-# Post-migration check (if migration succeeded)
 ssh <BASTION_SSH> "cat $LATEST/<VM_NAME>/post-migration-*.json 2>/dev/null"
 
-# Prometheus metrics (pre/during/post migration)
-ssh <BASTION_SSH> "cat $LATEST/<VM_NAME>/prometheus-pre-*.json 2>/dev/null"
-ssh <BASTION_SSH> "cat $LATEST/<VM_NAME>/prometheus-during-*.json 2>/dev/null"
-ssh <BASTION_SSH> "cat $LATEST/<VM_NAME>/prometheus-post-*.json 2>/dev/null"
+# Prometheus metrics (pre/during/post): extract min/max/avg per metric instead of the raw time series
+for PHASE in pre during post; do
+  ssh <BASTION_SSH> "jq '{
+    type, vm_name, namespace, migration_start_epoch, migration_end_epoch,
+    metrics: (.time_series | to_entries | map({
+      key: .key,
+      value: ([.value.data.result[].values[][1] | tonumber] as \$vals |
+        if (\$vals | length) == 0 then null
+        else {min: (\$vals | min), max: (\$vals | max), avg: ((\$vals | add) / (\$vals | length))}
+        end)
+    }) | from_entries)
+  }' $LATEST/<VM_NAME>/prometheus-${PHASE}-<VM_NAME>.json 2>/dev/null"
+done
 
-# Component logs (check for errors — all available logs)
-ssh <BASTION_SSH> "tail -50 $LATEST/<VM_NAME>/forklift-controller.log 2>/dev/null"
-ssh <BASTION_SSH> "tail -50 $LATEST/<VM_NAME>/virt-handler-source.log 2>/dev/null"
-ssh <BASTION_SSH> "tail -50 $LATEST/<VM_NAME>/virt-handler-target.log 2>/dev/null"
-ssh <BASTION_SSH> "tail -50 $LATEST/<VM_NAME>/virt-launcher-source.log 2>/dev/null"
-ssh <BASTION_SSH> "tail -50 $LATEST/<VM_NAME>/virt-launcher-target.log 2>/dev/null"
+# Component logs: grep for problems first
+ssh <BASTION_SSH> "grep -iE 'error|warn|exception|fail' $LATEST/<VM_NAME>/{forklift-controller,virt-handler-source,virt-handler-target,virt-launcher-source,virt-launcher-target}.log 2>/dev/null"
+# Only if the grep above found something relevant, pull the full context around it:
+# ssh <BASTION_SSH> "tail -50 $LATEST/<VM_NAME>/<the specific log>.log"
 
-# Per-VM pipeline log
+# Per-VM pipeline log (small, structured — fine to tail directly)
 ssh <BASTION_SSH> "tail -30 $LATEST/<VM_NAME>/run.log 2>/dev/null"
 ```
 

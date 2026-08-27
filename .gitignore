@@ -97,6 +97,10 @@ temp/
 !.claude/skills/cclm-test/bug-guidelines.md
 !.claude/skills/cclm-test/report-guidelines.md
 !.claude/skills/cclm-test/env.example.yaml
+!.claude/skills/cclm-test/chaos-injection-methods.md
+!.claude/skills/cclm-test/sweep-execution.md
+!.claude/skills/cclm-test/error-handling.md
+!.claude/skills/cclm-test/result-analysis.md
 
 # AI/IDE agent configs
 .agents/

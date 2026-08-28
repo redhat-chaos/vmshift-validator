@@ -304,6 +304,7 @@ help: ## Show help
 	@echo "  make density-status             Show VM status on source"
 	@echo "  make density-status COUNT_ONLY=1 OS=windows PHASE=Running"
 	@echo "                                  Count only, filtered by OS/phase"
+	@echo "  make density-status SUMMARY=1   Status counts, overall and by VM name prefix"
 	@echo "  make density-teardown           Remove VMs from both clusters"
 	@echo "  make win-vm-check VM=name       Verify Windows guest workload via guest agent"
 	@echo ""
@@ -542,14 +543,15 @@ density-setup: $(if $(_HAS_MIX),render-mixed-config) render-config ## Run kube-b
 		$(if $(_IS_WINDOWS),--win-oobe-secret $(WIN_OOBE_SECRET) --win-golden-namespace $(WIN_GOLDEN_NAMESPACE),) \
 		$(if $(LOCAL_SSH_OPTS),--local-ssh-opts "$(LOCAL_SSH_OPTS)",)
 
-density-status: ## Show density VM status on source cluster (COUNT_ONLY=1, OS=fedora|windows, PHASE=Running to filter)
+density-status: ## Show density VM status on source cluster (COUNT_ONLY=1, OS=fedora|windows, PHASE=Running, SUMMARY=1 for status counts by prefix)
 	@$(SCRIPTS_DIR)/density-status.sh \
 		--kubeconfig $(SOURCE_KUBECONFIG) \
 		--namespace $(NAMESPACE) \
 		--label-selector $(VM_LABEL_SELECTOR) \
 		$(if $(COUNT_ONLY),--count-only,) \
 		$(if $(OS),--os $(OS),) \
-		$(if $(PHASE),--phase $(PHASE),)
+		$(if $(PHASE),--phase $(PHASE),) \
+		$(if $(SUMMARY),--summary,)
 
 density-teardown: ## Remove density VMs and migration CRs (FORCE=1 to nuke stuck namespaces/finalizers)
 	@LOG_LEVEL=$(LOG_LEVEL) $(SCRIPTS_DIR)/density-teardown.sh \

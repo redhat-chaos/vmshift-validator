@@ -28,13 +28,13 @@ If discover-vms returns empty:
 
 ### Density-setup failures
 
-If density-setup fails or VMs get stuck, consult the detailed troubleshooting guide at `infra/cloud29/density-setup-troubleshooting.md`. Common issues:
+If density-setup fails or VMs get stuck, consult `docs/windows-density-troubleshooting.md` (Windows-specific) or `infra/cloud29/density-setup-troubleshooting.md`. Common issues:
 
 - **NFS CSI controller can't provision PVCs** — Restart the CSI controller pod: `kubectl delete pod -n kube-system -l app=csi-nfs-controller`
 - **Node-level NFS mount failures** (VMs stuck in `Starting`, pods in `Init:0/3`) — Cordon affected nodes, restart stuck VMs via `virtctl restart`, then uncordon
-- **Windows sysprep secret missing** (`FailedMount: secret "win2022-oobe-unattend" not found`) — kube-burner's `cleanup: true` deletes the namespace and pre-copied secret. Re-copy: `kubectl get secret win2022-oobe-unattend -n windows-golden-images -o json | python3 -c "..." | kubectl apply -f -`
+- **Windows sysprep secret missing** (`FailedMount: secret "win2022-oobe-unattend" not found`) — `density-setup.sh` already runs a background mirror loop that re-copies this secret automatically; if it's still missing, check `make check-windows-prereqs` ran cleanly *before* density-setup (verifies the golden PVC + OOBE secret exist in `WIN_GOLDEN_NAMESPACE` in the first place).
 - **Stuck kube-burner process** — Kill with `pkill -f "kube-burner|density-setup"`, clean up VMs, then retry
-- **Windows VM stabilization WARN** (rows=0) — Usually a timing issue; VMs are Running and workloads will stabilize within 5-10 minutes. Safe to proceed with migration.
+- **Windows VM stabilization WARN** (rows=0, or one VM shows `No result`) — Verify directly with `make win-vm-check VM=<name>` (guest-agent query, no manual base64/python needed) rather than assuming it's a false negative. If it reports healthy `lines=`/`rows=` counts, it's safe to proceed with migration — see `docs/windows-density-troubleshooting.md` for the full symptom list.
 
 ### Chaos-trigger.sh missing
 

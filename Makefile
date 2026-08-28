@@ -262,7 +262,7 @@ MIGRATION_ARGS := \
 
 .PHONY: help \
 	init-config \
-	check-prereqs check-clusters check-forklift \
+	check-prereqs check-clusters check-forklift check-windows-prereqs \
 	generate-keys setup-kubeconfigs render-config render-mixed-config \
 	density-setup density-status density-teardown \
 	discover-vms migrate-selective migrate-dry-run \
@@ -286,6 +286,7 @@ help: ## Show help
 	@echo "  make check-prereqs              Verify CLI tools, kubeconfigs, SSH key"
 	@echo "  make check-clusters             Test connectivity to both clusters"
 	@echo "  make check-forklift             Verify Forklift/MTV CRDs and mappings"
+	@echo "  make check-windows-prereqs      Verify Windows golden PVC + OOBE secret exist"
 	@echo "  make generate-keys              Generate SSH key pair for VM access"
 	@echo "  make setup-kubeconfigs           Copy kubeconfigs (SOURCE_KC=... TARGET_KC=...)"
 	@echo "  make render-config              Render kube-burner config from template"
@@ -304,6 +305,7 @@ help: ## Show help
 	@echo "  make density-status COUNT_ONLY=1 OS=windows PHASE=Running"
 	@echo "                                  Count only, filtered by OS/phase"
 	@echo "  make density-teardown           Remove VMs from both clusters"
+	@echo "  make win-vm-check VM=name       Verify Windows guest workload via guest agent"
 	@echo ""
 	@echo "Phase 2 - Selective migration:"
 	@echo "  make discover-vms               List VMs available for migration"
@@ -448,6 +450,20 @@ check-forklift: ## Verify Forklift/MTV CRDs and provider mappings
 		echo "  WARNING: Dest provider '$(PROVIDER_DEST_NAME)' not found in $(MTV_NAMESPACE)"
 	@echo ""
 	@echo "Forklift check complete."
+
+check-windows-prereqs: ## Verify Windows golden image PVC + OOBE secret exist on source cluster (before any Windows density-setup)
+	@echo "Checking Windows golden image prerequisites in $(WIN_GOLDEN_NAMESPACE) (source cluster)..."
+	@MISSING=0; \
+	KUBECONFIG=$(SOURCE_KUBECONFIG) kubectl get pvc $(WIN_GOLDEN_PVC) -n $(WIN_GOLDEN_NAMESPACE) >/dev/null 2>&1 && \
+		echo "  OK: golden PVC '$(WIN_GOLDEN_PVC)'" || \
+		{ echo "  MISSING: PVC '$(WIN_GOLDEN_PVC)' in $(WIN_GOLDEN_NAMESPACE)"; MISSING=1; }; \
+	KUBECONFIG=$(SOURCE_KUBECONFIG) kubectl get secret $(WIN_OOBE_SECRET) -n $(WIN_GOLDEN_NAMESPACE) >/dev/null 2>&1 && \
+		echo "  OK: OOBE secret '$(WIN_OOBE_SECRET)'" || \
+		{ echo "  MISSING: secret '$(WIN_OOBE_SECRET)' in $(WIN_GOLDEN_NAMESPACE)"; MISSING=1; }; \
+	if [[ $$MISSING -ne 0 ]]; then \
+		echo "Windows golden image prerequisites missing — see docs/windows-density-troubleshooting.md"; exit 1; \
+	fi; \
+	echo "All Windows prerequisites satisfied."
 
 generate-keys: ## Generate SSH key pair for VM access
 	@mkdir -p $(PROJECT_DIR)/keys
@@ -729,6 +745,13 @@ endif
 		echo "No virt-launcher pod found for VM=$(VM) on $(if $(filter target,$(CLUSTER)),target,source)" >&2; exit 1; \
 	fi; \
 	echo "$$NODE"
+
+win-vm-check: ## Verify Windows VM guest workload via QEMU guest agent (VM=name, CLUSTER=source|target)
+ifndef VM
+	$(error Specify VM=vm-name)
+endif
+	@if [[ "$(CLUSTER)" == "target" ]]; then KC=$(TARGET_KUBECONFIG); else KC=$(SOURCE_KUBECONFIG); fi; \
+	$(SCRIPTS_DIR)/check-windows-workload.sh --kubeconfig $$KC --namespace $(NAMESPACE) --vm $(VM) --cluster $(if $(filter target,$(CLUSTER)),target,source)
 
 vmim-status: ## Show jq-filtered VMIM status (VM=name to filter, else all VMIMs; CLUSTER=source|target, default source)
 	@if [[ "$(CLUSTER)" == "target" ]]; then KC=$(TARGET_KUBECONFIG); else KC=$(SOURCE_KUBECONFIG); fi; \

@@ -49,6 +49,12 @@ ssh <BASTION_SSH> "cd <BASTION_REPO> && KUBECONFIG=<BASTION_SOURCE_KC> virtctl s
 
 Note the `vm/<VM_NAME>` target form (bare `<VM_NAME>` fails) and that `--local-ssh` is not a valid flag on this virtctl version — host-key checking must be disabled via `--local-ssh-opts` instead.
 
+For **Windows** VMs (guest agent, not SSH), don't hand-assemble the base64/python-heredoc guest-agent dance — use the packaged check instead:
+
+```bash
+ssh <BASTION_SSH> 'cd <BASTION_REPO> && make win-vm-check VM=<VM_NAME>'   # add CLUSTER=target post-migration
+```
+
 ---
 
 ## Phase 1 — Understand the Test Request
@@ -106,7 +112,7 @@ Also ask if you don't know how to connect to the cluster:
 
 Before preparing the test, verify the cluster is ready. Run these checks via `ssh <BASTION_SSH>`.
 
-**Token efficiency: batch, don't fan out.** Steps 2a-2e below are independent read-only checks — combine as many as apply into a single `ssh <BASTION_SSH> bash <<'EOF' ... EOF` heredoc (or `&&`-chained one-liner) instead of one `ssh` call per check. Each separate `ssh` invocation costs a full round-trip's worth of tool overhead for output that's often one line. Skip 2d/2e per their own conditions (krknctl-only) but still fold whichever of 2a/2b/2c/2d/2e apply into one call.
+**Token efficiency: batch, don't fan out.** Steps 2a-2f below are independent read-only checks — combine as many as apply into a single `ssh <BASTION_SSH> bash <<'EOF' ... EOF` heredoc (or `&&`-chained one-liner) instead of one `ssh` call per check. Each separate `ssh` invocation costs a full round-trip's worth of tool overhead for output that's often one line. Skip 2d/2e/2f per their own conditions (krknctl-only / Windows-only) but still fold whichever of 2a/2b/2c/2d/2e/2f apply into one call.
 
 ### 2a. Cluster connectivity
 
@@ -175,7 +181,15 @@ ssh <BASTION_SSH> 'podman images --filter reference=quay.io/krkn-chaos/krkn-hub 
 
 If the required image is not present, pre-pull it to avoid timing issues during the test.
 
-### 2f. Present cluster analysis
+### 2f. Windows prereqs (only if density-setup with Windows VMs may be needed)
+
+If Phase 2b shows too few/no VMs and the test needs Windows VMs, check the golden image prereqs before running density-setup — cheaper than discovering a missing PVC/secret mid-run:
+
+```bash
+ssh <BASTION_SSH> 'cd <BASTION_REPO> && make check-windows-prereqs'
+```
+
+### 2g. Present cluster analysis
 
 Summarize findings:
 
@@ -208,11 +222,19 @@ ssh <BASTION_SSH> 'head -5 <BASTION_REPO>/cclm-chaos/scenarios/<ID>/chaos-trigge
 
 ### 3b. Density setup (ONLY if no VMs exist)
 
-**Check Phase 2b results first.** If Running VMs already exist, skip this step entirely. Only run density-setup when the source cluster has zero VMs or fewer than the test requires.
+**Check Phase 2b results first.** If Running VMs already exist, skip this step entirely. Only run density-setup when the source cluster has zero VMs or fewer than the test requires. For Windows VMs, run Phase 2f (`make check-windows-prereqs`) first if you haven't already.
+
+Run density-setup via `nohup ... &` (backgrounded, stdin redirected) and use `run_in_background` on the tool call, rather than a foreground `ssh` that blocks for the full duration:
 
 ```bash
 # ONLY if no VMs exist:
-ssh <BASTION_SSH> 'cd <BASTION_REPO> && make density-setup NAMESPACE=<NAMESPACE>'
+ssh <BASTION_SSH> 'cd <BASTION_REPO> && nohup make density-setup NAMESPACE=<NAMESPACE> < /dev/null > /tmp/density-setup.log 2>&1 &'
+```
+
+**Don't poll this on a timer.** The task notification tells you when it's done — read that, don't `sleep N; ssh ... tail` in a loop waiting for it. The one exception: if the user specifically asked you to watch for a symptom that only appears early (e.g. Windows `FailedMount`), one early check a short time after launch is reasonable — but after that, wait for the notification and then grep the final log once (`grep -E 'FAIL|WARN|Error|✓|✗' /tmp/density-setup.log`), don't re-tail on every poll.
+
+Once it completes:
+```bash
 ssh <BASTION_SSH> 'cd <BASTION_REPO> && make discover-vms'
 ```
 

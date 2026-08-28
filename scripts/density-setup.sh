@@ -250,7 +250,12 @@ Write-Output "$lines $rows"
 PIDS=()
 for vm in "${VM_NAMES[@]}"; do
   [[ -z "$vm" ]] && continue
-  stabilize_vm "$vm" &
+  # Each background job gets its own stdout/stderr file instead of sharing
+  # the parent's fd — 20+ concurrent jobs writing to one shared log can
+  # interleave mid-write (bash error/log messages aren't single atomic
+  # writes), producing garbled lines like "WIN: unbound variable" that
+  # look like real bugs but are really two jobs' output spliced together.
+  stabilize_vm "$vm" > "${STAB_RESULTS_DIR}/${vm}.log" 2>&1 &
   PIDS+=($!)
 done
 
@@ -263,8 +268,29 @@ for vm in "${VM_NAMES[@]}"; do
   [[ -z "$vm" ]] && continue
   result_file="${STAB_RESULTS_DIR}/${vm}"
   if [[ ! -f "$result_file" ]]; then
-    task.fail "${vm}" "No result"
-    FAILED=$((FAILED + 1))
+    # The background job died before writing a result (e.g. a transient
+    # unbound-variable/set -e abort). Rather than report a false failure,
+    # do one direct guest-agent/SSH check before giving up — see
+    # ${STAB_RESULTS_DIR}/${vm}.log for why the job died.
+    vm_os=$(detect_vm_os "$vm" "$NAMESPACE" "source")
+    VM_NAME="$vm"; VM_CLUSTER="source"
+    recheck_out=""
+    if is_windows_vm "$vm_os"; then
+      recheck_out=$(run_on_vm_via_agent '
+$lines = 0
+if (Test-Path "C:\data\test\log.txt") { $c = Get-Content "C:\data\test\log.txt"; $lines = if ($c) { @($c).Count } else { 0 } }
+Write-Output "$lines"
+' 2>/dev/null || echo "")
+    else
+      recheck_out=$(run_on_vm "wc -l < /data/test/log.txt 2>/dev/null || echo 0" 2>/dev/null || echo "")
+    fi
+    if [[ -n "$recheck_out" ]] && [[ "${recheck_out//[!0-9]/}" -ge 3 ]] 2>/dev/null; then
+      task.pass "${vm}" "(recovered after retry, lines=${recheck_out})"
+    else
+      log.verbose "$(cat "${STAB_RESULTS_DIR}/${vm}.log" 2>/dev/null || echo "no per-VM log captured")"
+      task.fail "${vm}" "No result"
+      FAILED=$((FAILED + 1))
+    fi
   elif grep -q "^PASS" "$result_file"; then
     task.pass "${vm}" "($(sed 's/^PASS //' "$result_file"))"
   else

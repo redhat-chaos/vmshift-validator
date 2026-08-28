@@ -535,7 +535,7 @@ density-status: ## Show density VM status on source cluster (COUNT_ONLY=1, OS=fe
 		$(if $(OS),--os $(OS),) \
 		$(if $(PHASE),--phase $(PHASE),)
 
-density-teardown: ## Remove density VMs and migration CRs
+density-teardown: ## Remove density VMs and migration CRs (FORCE=1 to nuke stuck namespaces/finalizers)
 	@LOG_LEVEL=$(LOG_LEVEL) $(SCRIPTS_DIR)/density-teardown.sh \
 		--source-kubeconfig $(SOURCE_KUBECONFIG) \
 		--target-kubeconfig $(TARGET_KUBECONFIG) \
@@ -543,7 +543,8 @@ density-teardown: ## Remove density VMs and migration CRs
 		--label-selector $(VM_LABEL_SELECTOR) \
 		--kube-burner-dir $(KUBE_BURNER_DIR) \
 		--config $(KUBE_BURNER_CONFIG) \
-		--mtv-namespace $(MTV_NAMESPACE)
+		--mtv-namespace $(MTV_NAMESPACE) \
+		$(if $(FORCE),--force,)
 
 # ═══════════════════════════════════════════════════════════════
 #  Phase 2 — Migration
@@ -765,7 +766,7 @@ clean-logs: ## Remove kube-burner logs
 	@rm -f $(KUBE_BURNER_DIR)/.rendered-*.yml
 	@echo "Kube-burner logs and rendered configs cleaned."
 
-clean-all: clean-migrations clean-generated clean-logs density-teardown ## Full cleanup
+clean-all: clean-migrations clean-generated clean-logs density-teardown ## Full cleanup (FORCE=1 to nuke stuck namespaces/finalizers on both clusters in parallel)
 
 # ═══════════════════════════════════════════════════════════════
 #  End-to-end

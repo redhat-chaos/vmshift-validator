@@ -117,7 +117,13 @@ make check-forklift                   # Verify Forklift CRDs + mappings
 
 # Phase 1 — Density
 make density-setup                    # Create VMs via kube-burner
+make density-setup FEDORA_VMS=200 WIN_VMS=50 SKIP_KUBE_BURNER=1
+                                       # Skip kube-burner init, stabilize existing VMs
+                                       # (recovery when kube-burner already finished creating
+                                       # VMs but its own maxWaitTimeout tripped before
+                                       # density-setup.sh reached the stabilize step)
 make density-status                   # Show VM table on source
+make density-status SUMMARY=1         # Deterministic status counts, overall + by VM name prefix
 make discover-vms                     # List VMs available for migration
 
 # Phase 2 — Migration
@@ -294,4 +300,5 @@ The bastion has its own `config.yaml`, `.config.mk`, and `keys/` — never overw
 - Each parallel migration creates a **separate Forklift Plan** per VM.
 - The `kubevirt-density.yml` job uses namespace `kubevirt-density` and its VMs lack the `workload-type=services-test` label — adjust `NAMESPACE` and `VM_LABEL_SELECTOR` accordingly.
 - When editing Forklift templates, use `REPLACE_*` placeholder names exactly as they appear — `migrate-vm.sh` does literal `sed` substitution.
+- `generate-mixed-config.sh`'s generated `vm-mixed.yml` sets `maxWaitTimeout: 1h` for `kube-burner init`. At large fleet sizes (250 VMs took 36m28s) this can still be tight — check the log's `"Job vm-mixed took Xm Ys"` line and bump it further if creation is approaching the ceiling. If `kube-burner init` errors with `context deadline exceeded` right after `"Actions in namespace ... completed"`, the VMs almost certainly finished creating fine — confirm with `make density-status SUMMARY=1`, then recover with `make density-setup SKIP_KUBE_BURNER=1 <same FEDORA_VMS/WIN_VMS as before>` to jump straight to workload stabilization instead of re-running kube-burner (which deletes and recreates the namespace, discarding all prior VM creation time).
 - `BASTION_SSH_KEY` in `profiles/baremetal-l2.env` must exist at the **same absolute path on both bastions** — `virtctl ssh` for the source cluster runs on `SOURCE_BASTION`, target on `TARGET_BASTION` (a separate machine via SSH hop), and both read this one path. If you move the checkout or repoint this variable, copy the key to the new path on `TARGET_BASTION` too, or post-migration checks fail with a silent-looking "SSH not ready" timeout (root cause is actually `Identity file not accessible`/`Permission denied`, visible only with verbose SSH debugging). `make check-prereqs` verifies both bastions — run it after any path change.

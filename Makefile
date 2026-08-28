@@ -529,7 +529,7 @@ render-mixed-config: ## Generate mixed-workload kube-burner config from per-type
 # mirror loop when --win-oobe-secret/--win-golden-namespace are passed.
 _IS_WINDOWS := $(if $(WIN_VMS),1,$(shell echo "$(KUBE_BURNER_CONFIG)" | grep -qi windows && echo 1))
 
-density-setup: $(if $(_HAS_MIX),render-mixed-config) render-config ## Run kube-burner and stabilize workloads
+density-setup: $(if $(_HAS_MIX),render-mixed-config) render-config ## Run kube-burner and stabilize workloads (SKIP_KUBE_BURNER=1 to resume stabilization against already-created VMs)
 	@LOG_LEVEL=$(LOG_LEVEL) GA_READY_TIMEOUT=$(GA_READY_TIMEOUT) GA_READY_INTERVAL=$(GA_READY_INTERVAL) $(SCRIPTS_DIR)/density-setup.sh \
 		--kubeconfig $(SOURCE_KUBECONFIG) \
 		--config $(RENDERED_CONFIG) \
@@ -541,7 +541,8 @@ density-setup: $(if $(_HAS_MIX),render-mixed-config) render-config ## Run kube-b
 		--stabilize-wait $(STABILIZE_WAIT) \
 		--ssh-ready-timeout $(SSH_READY_TIMEOUT) \
 		$(if $(_IS_WINDOWS),--win-oobe-secret $(WIN_OOBE_SECRET) --win-golden-namespace $(WIN_GOLDEN_NAMESPACE),) \
-		$(if $(LOCAL_SSH_OPTS),--local-ssh-opts "$(LOCAL_SSH_OPTS)",)
+		$(if $(LOCAL_SSH_OPTS),--local-ssh-opts "$(LOCAL_SSH_OPTS)",) \
+		$(if $(SKIP_KUBE_BURNER),--skip-kube-burner,)
 
 density-status: ## Show density VM status on source cluster (COUNT_ONLY=1, OS=fedora|windows, PHASE=Running, SUMMARY=1 for status counts by prefix)
 	@$(SCRIPTS_DIR)/density-status.sh \

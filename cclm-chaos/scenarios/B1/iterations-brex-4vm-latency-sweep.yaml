@@ -11,6 +11,14 @@
 #   ./chaos-sweep.sh -f iterations-brex-4vm-latency-sweep.yaml
 #   ./chaos-sweep.sh -f iterations-brex-4vm-latency-sweep.yaml --dry-run
 #   ./chaos-sweep.sh -f iterations-brex-4vm-latency-sweep.yaml --start-from 10ms-4vm
+#
+# NOTE (2026-08-10): vm-svc-446e62a5-4/-12/-13/-16 had already been migrated away
+# by unrelated A-series scenario runs earlier in this session (Stopped on source).
+# Substituted with fresh, unused VMs from the same density batch: -56, -57, -58, -59
+# respectively, in the 0ms/15ms/20ms/30ms iterations (originally tried -42..-45, but
+# those turned out to already be reserved by B2's brex loss-sweep YAML — picked
+# high-numbered VMs (56+) instead since no sweep YAML references that range).
+# All other VMs unchanged.
 
 sweep_name: "brex-4vm-latency-sweep"
 description: "B1 br-ex latency sweep — VMIM-running trigger, 0/5/10/15/20/30ms, 2F+2W per iteration"
@@ -40,7 +48,7 @@ iterations:
     interface: br-ex
     vms:
       - vm-svc-446e62a5-3
-      - vm-svc-446e62a5-4
+      - vm-svc-446e62a5-56
       - vm-win-446e62a5-1
       - vm-win-446e62a5-2
 
@@ -73,7 +81,7 @@ iterations:
     interface: br-ex
     vms:
       - vm-svc-446e62a5-9
-      - vm-svc-446e62a5-12
+      - vm-svc-446e62a5-57
       - vm-win-446e62a5-7
       - vm-win-446e62a5-8
 
@@ -83,7 +91,7 @@ iterations:
     latency: "20ms"
     interface: br-ex
     vms:
-      - vm-svc-446e62a5-13
+      - vm-svc-446e62a5-58
       - vm-svc-446e62a5-14
       - vm-win-446e62a5-9
       - vm-win-446e62a5-10
@@ -94,7 +102,7 @@ iterations:
     latency: "30ms"
     interface: br-ex
     vms:
-      - vm-svc-446e62a5-16
+      - vm-svc-446e62a5-59
       - vm-svc-446e62a5-17
       - vm-win-446e62a5-11
       - vm-win-446e62a5-12

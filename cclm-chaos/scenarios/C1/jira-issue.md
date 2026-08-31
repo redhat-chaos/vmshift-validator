@@ -1,4 +1,4 @@
-# Jira issue copy — C1 CPU stress on source node
+# Jira issue copy — C1 cluster-wide CPU saturation during bulk parallel migration
 
 > Create **one** Jira issue per scenario ID. Keep the **Description** aligned with `scenario-test-spec.template.md`. Each execution adds a **comment** using `test-run-result.template.md` + link to `test-run-report.template.md`.
 
@@ -7,7 +7,7 @@
 ## Summary (Jira "Summary" field -- max ~255 chars)
 
 ```
-[CCLM-Chaos][C1] CPU stress on source node (90%) during cross-cluster live migration
+[CCLM-Chaos][C1] Cluster-wide CPU saturation during bulk parallel (20-40 VM) cross-cluster live migration
 ```
 
 ---
@@ -24,88 +24,127 @@ Cross-cluster live migration (CCLM) resilience testing: MTV/Forklift + OpenShift
 |-------|-------|
 | **ID** | C1 |
 | **Category** | C — Resource Stress |
-| **Name** | CPU stress on source node (90%) |
+| **Name** | Cluster-wide CPU saturation during bulk parallel migration |
 | **Automation** | Direct |
-| **Fault cluster** | Source (worker node hosting the VM) |
-| **Tooling** | `krknctl run node-cpu-hog` |
+| **Fault cluster** | Two variants — C1-source (all source/blue workers), C1-target (all target/green workers) |
+| **Tooling** | `krknctl run node-cpu-hog` (all workers) + `make migrate-selective` (bulk) |
 
 ### What we test
 
-During live migration, the source node runs the QEMU process that tracks dirty memory pages and streams them to the target. When the source worker node is under 90% CPU stress, the dirty-page tracking may slow down, the iterative memory copy phase may fail to converge, and the migration could stall or time out. This scenario validates whether the migration pipeline can complete under severe CPU contention on the source and whether guest workload integrity is preserved.
+Can the CCLM platform evacuate or land **20–40 VMs in parallel while an entire cluster is CPU-saturated?** This mirrors a real incident: draining a source cluster that is already hot, or receiving a migration wave onto a hot target. Two variants isolate the bottleneck:
+
+- **C1-source** — saturate all source workers → stresses QEMU dirty-page tracking and the migration **send** side.
+- **C1-target** — saturate all target workers → stresses destination QEMU startup, page-fault handling, and virt-launcher/CDI on the **receive** side.
+
+This round is a **throughput / queueing-under-contention** test, not a convergence test (see Non-goals).
+
+### Environment (cloud29, confirmed at design time)
+
+- Source (blue) and target (green): 10 workers each, **112 cores / ~503 GiB** per worker.
+- **CPUManager policy = `none`** (no CPU pinning) — a node-level hog can contend with QEMU.
+- Test VMs: **1 core / 512Mi**, ~0 memory dirty rate; virt-launcher `compute` is Burstable, cpu request=100m, **no limit**.
+- 161 running VMs available on source.
+- Forklift/MTV runs on **green** (target); **VMIMs live on blue** (source) → blue's `liveMigrationConfig` is the concurrency gate.
+- Blue defaults: `parallelMigrationsPerCluster=5`, `parallelOutboundMigrationsPerNode=2`, `completionTimeoutPerGiB=150`, `progressTimeout=150`, `allowAutoConverge=false`, `allowPostCopy=false`.
 
 ### Preconditions
 
-- VM: `vm-svc-0` in `vm-services` (default)
-- Clusters: source (blue) -> target (green)
-- Required CRs / plans: None pre-existing — created by `make migrate-selective`
-- `krknctl` installed with `node-cpu-hog` scenario available
+- ≥40 running, migratable Fedora VMs (`workload-type=services-test`) in `vm-services`.
+- Clusters: source (blue) → target (green); storage nfs-csi (RWX).
+- **Raised concurrency limits applied before the run** (see below) — at defaults this is not a parallel test.
+- `krknctl` installed with `node-cpu-hog` available.
+
+### Setup — raise concurrency (once)
+
+VMIMs live on the source, so patch the **blue HCO** `liveMigrationConfig` (not the KubeVirt CR):
+
+```bash
+oc --kubeconfig "$SOURCE_KUBECONFIG" -n openshift-cnv patch hco kubevirt-hyperconverged \
+  --type=merge -p '{"spec":{"liveMigrationConfig":{"parallelMigrationsPerCluster":40,"parallelOutboundMigrationsPerNode":4}}}'
+```
+
+Also raise Forklift `max_vm_inflight` on green. Measure the effective concurrency actually reached — do not assume.
 
 ### Fault injection (summary)
 
-Apply 90% CPU stress to the source worker node hosting the VM using `krknctl run node-cpu-hog`. The stress runs for 300 seconds and is gated on the source-side VMIM reaching `Running` phase (falling back to firing anyway after a 300s trigger timeout), so the iterative memory copy phase experiences CPU contention on the source node.
+Apply CPU saturation to **all worker nodes** on the stressed side using `krknctl run node-cpu-hog`, gated on the first source VMIM reaching `Running` (with `run_anyway` fallback), sustained across the bulk-migration window.
 
 ```bash
 krknctl run node-cpu-hog \
-  --kubeconfig "$SOURCE_KUBECONFIG" \
-  --cpu-percentage 90 \
-  --chaos-duration 300 \
+  --kubeconfig "$MERGED_KUBECONFIG" \
+  --cpu-percentage 100 \
+  --chaos-duration 600 \
   --node-selector "node-role.kubernetes.io/worker=" \
-  --number-of-nodes 1 \
-  --trigger-command "KUBECONFIG=\"$SOURCE_KUBECONFIG\" kubectl get vmim -n \"$NAMESPACE\" -o jsonpath='{.items[*].status.phase}' | grep -qw Running" \
+  --number-of-nodes 10 \
+  --trigger-command "kubectl --context $BLUE_CONTEXT get vmim -n \"$NAMESPACE\" -o jsonpath='{.items[*].status.phase}' | grep -qw Running" \
   --trigger-expected-rc 0 --triggers-interval 5 --triggers-timeout 300 --triggers-on-timeout run_anyway
 ```
 
+For **C1-target**, point the hog at the green worker role/context; the migration command is unchanged.
+
+### Why 90% is a near no-op here
+
+112 cores per worker vs 1-core VMs, and virt-launcher `compute` has no CPU limit, so QEMU bursts into idle headroom. 90% leaves ~11 idle cores per node. The stress only reaches QEMU at **saturation (≥100% / oversubscribed)**, where CFS throttles compute toward its 100m share.
+
 ### Trigger / timing
 
-Chaos is applied when: **VMIM reaches `Running` phase on source** (active memory copy has started), wired into krknctl's native `--trigger-command`/`--triggers-*` flags instead of a fixed sleep — see scenario spec for the exact one-line gate condition.
+Chaos fires when the **first source VMIM reaches `Running`** (bulk migration copying memory), via krknctl's native `--trigger-command`/`--triggers-*` flags — see scenario spec for the exact gate and the in-container kubeconfig/`--context` workaround.
 
 ### Sweep values
 
-Test CPU utilization levels: **70%, 80%, 90%, 95%**. Override via `CPU_PERCENTAGE=<value>`.
+Stress ladder per variant: **90% → 100% → oversubscribe (>100%)**. Oversubscribe needs more hog processes than cores per node — pin against `krknctl describe node-cpu-hog`. Override via `CPU_PERCENTAGE=<value>`.
 
-### Notes
+### Metrics
 
-- **CPU stress vs network chaos (B1/B2).** CPU stress on the SOURCE affects QEMU's ability to track dirty pages and stream memory. This is a different bottleneck from network chaos (B1/B2) — it tests whether the migration pipeline can converge when the source hypervisor is overloaded. B1/B2 showed br-migration is throughput-limited; CPU stress creates a dirty-page-rate bottleneck instead.
-- **Target the VM's host node.** Target the specific worker node hosting the test VM using `--node-selector` or node name. All 10 source workers need not be stressed.
-- **Storage:** nfs-csi (RWX).
+- Completion rate (succeeded / failed / timed-out) per stress level.
+- Total drain wall-clock vs a **no-stress baseline** (run this first).
+- Per-migration duration distribution (p50 / p95 / max).
+- Count hitting `progressTimeout` / `completionTimeoutPerGiB` (150s).
+- **Effective concurrency achieved** (did raising limits actually get ~40 in flight?).
+- Node `Ready` status on the stressed side throughout.
 
 ### Expected result
 
-Migration completes but is slower than baseline. The dirty-page convergence phase takes more iterations. In worst case, migration may time out if convergence cannot be achieved. Guest workload integrity is preserved regardless of migration outcome.
+At 90%: all migrations complete, drain time barely above baseline. At 100%/oversubscribe: drain time rises materially, effective concurrency may drop, and worst case some migrations hit the 150s progress/completion timeout. Guest integrity preserved throughout (no dirty load to cause data-path issues).
 
 ### Success criteria
 
-- Migration completes successfully (may be slower than baseline).
-- Post-migration guest validation passes (services, SQLite, files, HTTP).
-- No data loss or corruption.
-- If migration fails, source VM remains running and recoverable.
+- Migrations complete (or meet a defined completion threshold); Plans `Succeeded`.
+- Total drain wall-clock longer than baseline but bounded.
+- Effective concurrency reaches the raised limit under no/low stress.
+- Post-migration guest validation passes (services, SQLite, files, HTTP); no data loss.
+- All stressed workers stay `Ready`.
 
 ### Failure signals
 
-- Migration times out or enters `Failed` phase.
+- Migrations time out (`progressTimeout` / `completionTimeoutPerGiB`) or enter `Failed`.
+- virt-launcher evicted or OOMKilled on a stressed node.
+- A stressed worker goes `NotReady` (kubelet/virt-handler starvation cascade).
+- Effective concurrency collapses far below the raised limit under stress.
 - Post-migration checks show data loss or service disruption.
-- virt-launcher pod evicted or OOMKilled on source.
-- Guest workloads show gaps in continuity.
 
 ### Non-goals / safety
 
-- Lab environment only — 90% CPU stress affects all workloads on the node.
-- Does not test CPU stress on target or control-plane nodes (see C2).
-- Does not test multi-VM concurrent migrations under stress.
+- **Convergence failure is out of scope this round** — tiny 512Mi zero-dirty VMs always converge; add an in-guest memory-dirtying load to test convergence/timeouts.
+- **No per-node attribution** — the fault is cluster-wide by design.
+- Does not test combined source+target stress in one run, or control-plane stress.
+- **Lab only.** Saturating all 10 workers on a side risks a `NotReady` cascade (kubelet/virt-handler/ingress/DNS starvation) — keep a live node-`Ready` monitor and a `krknctl delete` kill switch ready. Control-plane nodes are not stressed.
 
 ### Specification link
 
 - Scenario spec (internal): `cclm-chaos/scenarios/C1/scenario-spec.md`
 - Krkn / runbook: `krknctl describe node-cpu-hog`
+- Concurrency knobs: HCO `liveMigrationConfig` + Forklift `max_vm_inflight` (see C3 scale notes).
 
 ### Labels (suggested)
 
-`cclm-chaos`, `mtv`, `kubevirt`, `scenario-C1`, `automation-direct`
+`cclm-chaos`, `mtv`, `kubevirt`, `scenario-C1`, `automation-direct`, `resource-stress`, `scale`
 
 ---
 
 ## Acceptance criteria (optional)
 
 1. Scenario spec document exists and matches catalog row C1.
-2. At least one lab execution documented with PASS/FAIL and linked report.
-3. Krkn/manual commands validated against current `krknctl describe` for the pinned tool version.
+2. Concurrency limits raised and effective concurrency measured; no-stress baseline captured.
+3. Both variants (C1-source, C1-target) executed across the stress ladder, each with a PASS/FAIL and linked report.
+4. Krkn/manual commands validated against current `krknctl describe` for the pinned tool version.

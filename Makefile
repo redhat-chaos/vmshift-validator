@@ -89,6 +89,13 @@ FEDORA_VMS ?=
 FEDORA_HEAVY_VMS ?=
 WIN_VMS ?=
 
+# Split each type's VM count into sequential batches of at most this many
+# replicas (0 = single batch, all at once). kube-burner waits for one batch
+# to finish (waitWhenFinished) before starting the next, capping how many VM
+# disk clones run concurrently against the storage backend — e.g.
+# WIN_VMS=80 BATCH_SIZE=10 creates 8 sequential batches of 10.
+BATCH_SIZE ?= 0
+
 _HAS_MIX := $(strip $(FEDORA_VMS)$(FEDORA_HEAVY_VMS)$(WIN_VMS))
 ifneq ($(_HAS_MIX),)
   KUBE_BURNER_CONFIG := vm-mixed.yml
@@ -301,6 +308,8 @@ help: ## Show help
 	@echo "                                  Create mixed workload (30 Fedora + 10 Windows)"
 	@echo "  make density-setup FEDORA_VMS=20 FEDORA_HEAVY_VMS=5 WIN_VMS=5"
 	@echo "                                  Three-way mixed workload"
+	@echo "  make density-setup WIN_VMS=80 BATCH_SIZE=10"
+	@echo "                                  8 sequential batches of 10 (caps concurrent clones)"
 	@echo "  make density-status             Show VM status on source"
 	@echo "  make density-status COUNT_ONLY=1 OS=windows PHASE=Running"
 	@echo "                                  Count only, filtered by OS/phase"
@@ -521,6 +530,7 @@ render-mixed-config: ## Generate mixed-workload kube-burner config from per-type
 		$(if $(FEDORA_HEAVY_VMS),--fedora-heavy $(FEDORA_HEAVY_VMS)) \
 		$(if $(WIN_VMS),--windows $(WIN_VMS)) \
 		--namespace $(NAMESPACE) \
+		--batch-size $(BATCH_SIZE) \
 		> "$(KUBE_BURNER_DIR)/vm-mixed.yml"
 
 # For Windows VMs the OOBE sysprep secret must be mirrored into NAMESPACE

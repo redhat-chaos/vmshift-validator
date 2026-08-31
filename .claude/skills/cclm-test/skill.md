@@ -1,6 +1,6 @@
 ---
 skill: cclm-test
-model: opus
+model: sonnet
 description: >
   End-to-end CCLM chaos test runner: analyze cluster state, prepare and verify
   chaos injection with the user, execute migration + chaos, validate injection
@@ -36,6 +36,24 @@ Read `.claude/skills/cclm-test/env.yaml` at the start of every session and subst
 | `<SYNC_CMD>` | `sync_cmd` |
 
 If `env.yaml` is missing, copy it from `env.example.yaml` in the same directory and confirm the values with the user before proceeding (`env.yaml` is gitignored — it holds this bastion's real paths, while `env.example.yaml` is the committed template). If a key is blank, ask the user for the value — do not guess or reuse a path from a previous session.
+
+### Ad-hoc guest command (for spot-checking a VM's workload outside the standard pipeline)
+
+The pipeline scripts use `scripts/lib/ssh.sh`'s flags internally; use the same pattern for any manual check so you don't have to rediscover working flags by trial and error:
+
+```bash
+ssh <BASTION_SSH> "cd <BASTION_REPO> && KUBECONFIG=<BASTION_SOURCE_KC> virtctl ssh <SSH_USER>@vm/<VM_NAME> -n <NAMESPACE> -i keys/kube-burner \
+  --local-ssh-opts='-o StrictHostKeyChecking=no' --local-ssh-opts='-o UserKnownHostsFile=/dev/null' \
+  --command 'systemctl is-active file-writer sqlite-writer http-server crond'"
+```
+
+Note the `vm/<VM_NAME>` target form (bare `<VM_NAME>` fails) and that `--local-ssh` is not a valid flag on this virtctl version — host-key checking must be disabled via `--local-ssh-opts` instead.
+
+For **Windows** VMs (guest agent, not SSH), don't hand-assemble the base64/python-heredoc guest-agent dance — use the packaged check instead:
+
+```bash
+ssh <BASTION_SSH> 'cd <BASTION_REPO> && make win-vm-check VM=<VM_NAME>'   # add CLUSTER=target post-migration
+```
 
 ---
 
@@ -92,7 +110,9 @@ Also ask if you don't know how to connect to the cluster:
 
 ## Phase 2 — Analyze Cluster State
 
-Before preparing the test, verify the cluster is ready. Run these checks via `ssh <BASTION_SSH>`:
+Before preparing the test, verify the cluster is ready. Run these checks via `ssh <BASTION_SSH>`.
+
+**Token efficiency: batch, don't fan out.** Steps 2a-2f below are independent read-only checks — combine as many as apply into a single `ssh <BASTION_SSH> bash <<'EOF' ... EOF` heredoc (or `&&`-chained one-liner) instead of one `ssh` call per check. Each separate `ssh` invocation costs a full round-trip's worth of tool overhead for output that's often one line. Skip 2d/2e/2f per their own conditions (krknctl-only / Windows-only) but still fold whichever of 2a/2b/2c/2d/2e/2f apply into one call.
 
 ### 2a. Cluster connectivity
 
@@ -105,11 +125,26 @@ If either fails, ask the user for correct kubeconfig paths or bastion access met
 
 ### 2b. Existing VMs — ALWAYS CHECK FIRST
 
+The namespace can hold hundreds of VMs — use `discover-vms.sh`'s filter flags instead of raw `kubectl`/`jq` so counts and candidate lookups run as a single scoped query, not an unbounded dump into the conversation:
+
 ```bash
-ssh <BASTION_SSH> 'KUBECONFIG=<BASTION_SOURCE_KC> kubectl get vmi -n <NAMESPACE> --no-headers 2>/dev/null'
+# Count only (namespace-wide, no table)
+ssh <BASTION_SSH> 'cd <BASTION_REPO> && make discover-vms COUNT_ONLY=1'
+
+# Count of currently-Running VMs, optionally by OS
+ssh <BASTION_SSH> 'cd <BASTION_REPO> && make discover-vms COUNT_ONLY=1 PHASE=Running'
+ssh <BASTION_SSH> 'cd <BASTION_REPO> && make discover-vms COUNT_ONLY=1 PHASE=Running OS=fedora'
 ```
 
 Count the Running VMs. **Never run density-setup or density-teardown without checking first.** If enough Running VMs already exist for the test, skip density-setup entirely and use the existing VMs. Only run density-setup if there are zero VMs or not enough for the requested test. Never run density-teardown before a re-run — just clean migration CRs (`make clean-migrations`) if needed.
+
+When picking a specific candidate VM (e.g. one not already migrated), use `NOT_MIGRATED=1` rather than hand-rolling a `comm` diff — it only counts VMs that currently have a source VMI and no VMI yet on target (excludes stopped/orphaned VMs with no source VMI, which aren't valid candidates):
+
+```bash
+ssh <BASTION_SSH> 'cd <BASTION_REPO> && make discover-vms NOT_MIGRATED=1 OS=fedora' | head -6
+```
+
+`density-status.sh` supports the same `COUNT_ONLY`/`OS`/`PHASE` flags (via `make density-status ...`) when you need source-cluster node/IP detail instead of the migration-eligibility view `discover-vms` gives.
 
 ### 2c. Forklift readiness
 
@@ -130,7 +165,7 @@ grep -q 'krknctl' cclm-chaos/scenarios/<ID>/chaos-trigger.sh && echo "uses krknc
 Skip this step only if that grep says "direct injection". For krknctl-based scenarios:
 
 ```bash
-ssh <BASTION_SSH> 'which krknctl 2>/dev/null && krknctl version 2>/dev/null || echo "krknctl not found"'
+ssh <BASTION_SSH> 'which krknctl 2>/dev/null && krknctl --help >/dev/null 2>&1 && echo "krknctl OK" || echo "krknctl not found"'
 ssh <BASTION_SSH> 'systemctl is-active podman.socket 2>/dev/null || echo "podman socket inactive"'
 ```
 
@@ -146,7 +181,15 @@ ssh <BASTION_SSH> 'podman images --filter reference=quay.io/krkn-chaos/krkn-hub 
 
 If the required image is not present, pre-pull it to avoid timing issues during the test.
 
-### 2f. Present cluster analysis
+### 2f. Windows prereqs (only if density-setup with Windows VMs may be needed)
+
+If Phase 2b shows too few/no VMs and the test needs Windows VMs, check the golden image prereqs before running density-setup — cheaper than discovering a missing PVC/secret mid-run:
+
+```bash
+ssh <BASTION_SSH> 'cd <BASTION_REPO> && make check-windows-prereqs'
+```
+
+### 2g. Present cluster analysis
 
 Summarize findings:
 
@@ -179,11 +222,19 @@ ssh <BASTION_SSH> 'head -5 <BASTION_REPO>/cclm-chaos/scenarios/<ID>/chaos-trigge
 
 ### 3b. Density setup (ONLY if no VMs exist)
 
-**Check Phase 2b results first.** If Running VMs already exist, skip this step entirely. Only run density-setup when the source cluster has zero VMs or fewer than the test requires.
+**Check Phase 2b results first.** If Running VMs already exist, skip this step entirely. Only run density-setup when the source cluster has zero VMs or fewer than the test requires. For Windows VMs, run Phase 2f (`make check-windows-prereqs`) first if you haven't already.
+
+Run density-setup via `nohup ... &` (backgrounded, stdin redirected) and use `run_in_background` on the tool call, rather than a foreground `ssh` that blocks for the full duration:
 
 ```bash
 # ONLY if no VMs exist:
-ssh <BASTION_SSH> 'cd <BASTION_REPO> && make density-setup NAMESPACE=<NAMESPACE>'
+ssh <BASTION_SSH> 'cd <BASTION_REPO> && nohup make density-setup NAMESPACE=<NAMESPACE> < /dev/null > /tmp/density-setup.log 2>&1 &'
+```
+
+**Don't poll this on a timer.** The task notification tells you when it's done — read that, don't `sleep N; ssh ... tail` in a loop waiting for it. The one exception: if the user specifically asked you to watch for a symptom that only appears early (e.g. Windows `FailedMount`), one early check a short time after launch is reasonable — but after that, wait for the notification and then grep the final log once (`grep -E 'FAIL|WARN|Error|✓|✗' /tmp/density-setup.log`), don't re-tail on every poll.
+
+Once it completes:
+```bash
 ssh <BASTION_SSH> 'cd <BASTION_REPO> && make discover-vms'
 ```
 
@@ -198,8 +249,8 @@ ssh <BASTION_SSH> 'cd <BASTION_REPO> && make clean-migrations MIGRATION_PROFILE=
 Resolve real node names and pod names for the chaos target:
 
 ```bash
-# VM's source node
-ssh <BASTION_SSH> 'KUBECONFIG=<BASTION_SOURCE_KC> kubectl get vmi <VM_NAME> -n <NAMESPACE> -o jsonpath="{.status.nodeName}"'
+# VM's source node (use CLUSTER=target for target-side scenarios)
+ssh <BASTION_SSH> 'cd <BASTION_REPO> && make vm-node VM=<VM_NAME>'
 
 # VM's pod name (for pod-kill scenarios)
 ssh <BASTION_SSH> 'KUBECONFIG=<BASTION_SOURCE_KC> kubectl get pods -n <NAMESPACE> -l "kubevirt.io/vm=<VM_NAME>" -o jsonpath="{.items[0].metadata.name}"'
@@ -219,6 +270,10 @@ For infrastructure targets (gateway nodes, forklift-controller, etc.), resolve t
 5. Only after 1–4 are exhausted, fall back to a manual workaround — tell the user you're deviating and treat it as a plan change requiring Phase 4 confirmation.
 
 For krknctl-based scenarios needing a genuinely new scenario (not troubleshooting), invoke `/krkn-scenario` instead of hand-building flags.
+
+**When a scenario has multiple `*.sh` variants** (e.g. a phase-gated wrapper alongside the base `chaos-trigger.sh`, or a `*-multi-phase-test.sh`), don't read every variant "for context" — read only the one you determined is authoritative for this run's trigger gate. Reading unused sibling scripts is pure token cost with no effect on the run.
+
+**Reading `chaos-trigger.sh` itself:** its default `--trigger-command` is usually already inlined in the scenario's `scenario-spec.md` under "Trigger gate" — check there first. Only `cat`/read the full script when the spec's inlined command doesn't match what you need to pass (e.g. a custom trigger), or when diagnosing a failure.
 
 ### 3e. Determine iteration number
 
@@ -285,15 +340,21 @@ The execution order depends on the **trigger gate in the scenario spec**, not th
 
 **CRITICAL: Always use separate SSH sessions** — never combine chaos trigger + migration in a single compound SSH command (subshell/backgrounding causes make to fail):
 
+**Redirect stdin too, not just stdout/stderr.** `nohup cmd > log 2>&1 &` without `< /dev/null` leaves the backgrounded process holding the SSH session's pty open, so the outer `ssh` call itself hangs until the tool's timeout fires and auto-backgrounds it — wasting a full timeout wait for something that should return in under a second.
+
 ```bash
 # Session 1: chaos trigger in background via nohup
-ssh <BASTION_SSH> 'cd <BASTION_REPO> && nohup bash cclm-chaos/scenarios/<ID>/chaos-trigger.sh <VM_NAME> <LATENCY> > /tmp/chaos-<VM_NAME>.log 2>&1 &'
+ssh <BASTION_SSH> 'cd <BASTION_REPO> && nohup bash cclm-chaos/scenarios/<ID>/chaos-trigger.sh <VM_NAME> <LATENCY> < /dev/null > /tmp/chaos-<VM_NAME>.log 2>&1 &'
 
 # Session 2: migration (separate SSH call)
 ssh <BASTION_SSH> 'cd <BASTION_REPO> && make migrate-selective VMS=<VM_NAME> MIGRATION_PROFILE=<MIGRATION_PROFILE> RUN_TAG=<tag>-<YYYYMMDDTHHMMSSZ>'
 
-# Check chaos trigger output after migration completes
-ssh <BASTION_SSH> 'cat /tmp/chaos-<VM_NAME>.log'
+# Check chaos trigger output after migration completes — grep, don't cat.
+# krknctl/krkn logs open with ~50-70 lines of plugin-registration and
+# environment-table boilerplate that carries no signal; a raw `cat` or `tail`
+# pulls all of it into context for zero benefit. Pull only the lines that
+# matter: trigger satisfaction, the actual kill, and any error/warning.
+ssh <BASTION_SSH> "grep -E 'trigger condition (not )?satisfied|Deleting pod|Gracefully deleting|Killing|ERROR|WARNING' /tmp/chaos-<VM_NAME>.log"
 ```
 
 ### 5b. Monitor execution
@@ -301,6 +362,10 @@ ssh <BASTION_SSH> 'cat /tmp/chaos-<VM_NAME>.log'
 Watch both processes. The migration typically takes 60–120s. Report progress to the user as it happens.
 
 **Important:** Never run krknctl directly outside of chaos-trigger.sh — the script handles trigger timing, node resolution, and command execution.
+
+**When polling mid-run (e.g. after a `sleep N` to check trigger/VMIM progress), re-grep the log with the same pattern rather than re-`cat`ing it — otherwise every poll re-spends tokens on the same boilerplate header it already showed once.**
+
+**Use the bastion's clock for `RUN_TAG` timestamps, not the local machine's** — `ssh <BASTION_SSH> 'date -u +%Y%m%dT%H%M%SZ'` directly. Querying the local shell's `date` first (when its clock may be skewed relative to the lab) just costs an extra round trip when you redo it against the bastion anyway.
 
 ### 5c. Sweep execution (when user requests multiple iterations)
 
@@ -366,37 +431,44 @@ If injection was NOT confirmed, warn the user and suggest debugging steps. Do no
 
 ## Phase 7 — Analyze Results
 
+**Model note:** 7a (below) is pure extraction and stays on the skill's default model. 7b–8f need real judgment — once 7a's condensed data is in hand, delegate to a subagent configured with `model: opus`, passing it only the condensed data (never raw JSON/logs), and use its output for the analysis/report. This keeps the expensive model reserved for the phases that actually need it.
+
 ### 7a. Collect raw data
+
+Prometheus dumps are raw time-series JSON (~15KB per file, 3 files per VM) — always reduce to aggregates with `jq`, never `cat` them whole. `post-migration-*.json` can also balloon into multiple MB (its `large_data_validation` field embeds full large-file dumps) — always jq-filter it to the fields analysis actually uses, never `cat`/pretty-print it whole; a raw dump can blow past tool-output limits and waste a full round trip. Component logs are almost always clean on a passing run — grep for problems first and only pull a full tail when something matches.
 
 ```bash
 # Latest report directory
 LATEST=$(ssh <BASTION_SSH> 'ls -td <BASTION_REPO>/reports/run-* 2>/dev/null | head -1')
 
-# Summary
+# Summary and per-VM metrics/baselines are small (1-3KB) — cat these directly
 ssh <BASTION_SSH> "cat $LATEST/summary.json"
-
-# Per-VM migration metrics
 ssh <BASTION_SSH> "cat $LATEST/<VM_NAME>/migration-metrics-*.json"
-
-# Pre-migration baseline
 ssh <BASTION_SSH> "cat $LATEST/<VM_NAME>/pre-migration-*.json"
 
-# Post-migration check (if migration succeeded)
-ssh <BASTION_SSH> "cat $LATEST/<VM_NAME>/post-migration-*.json 2>/dev/null"
+# post-migration-*.json can be several MB (large_data_validation embeds full file dumps) — jq down to what's needed
+ssh <BASTION_SSH> "jq '{verdict, vm_info, comparison, cluster}' $LATEST/<VM_NAME>/post-migration-*.json 2>/dev/null"
 
-# Prometheus metrics (pre/during/post migration)
-ssh <BASTION_SSH> "cat $LATEST/<VM_NAME>/prometheus-pre-*.json 2>/dev/null"
-ssh <BASTION_SSH> "cat $LATEST/<VM_NAME>/prometheus-during-*.json 2>/dev/null"
-ssh <BASTION_SSH> "cat $LATEST/<VM_NAME>/prometheus-post-*.json 2>/dev/null"
+# Prometheus metrics (pre/during/post): extract min/max/avg per metric instead of the raw time series
+for PHASE in pre during post; do
+  ssh <BASTION_SSH> "jq '{
+    type, vm_name, namespace, migration_start_epoch, migration_end_epoch,
+    metrics: (.time_series | to_entries | map({
+      key: .key,
+      value: ([.value.data.result[].values[][1] | tonumber] as \$vals |
+        if (\$vals | length) == 0 then null
+        else {min: (\$vals | min), max: (\$vals | max), avg: ((\$vals | add) / (\$vals | length))}
+        end)
+    }) | from_entries)
+  }' $LATEST/<VM_NAME>/prometheus-${PHASE}-<VM_NAME>.json 2>/dev/null"
+done
 
-# Component logs (check for errors — all available logs)
-ssh <BASTION_SSH> "tail -50 $LATEST/<VM_NAME>/forklift-controller.log 2>/dev/null"
-ssh <BASTION_SSH> "tail -50 $LATEST/<VM_NAME>/virt-handler-source.log 2>/dev/null"
-ssh <BASTION_SSH> "tail -50 $LATEST/<VM_NAME>/virt-handler-target.log 2>/dev/null"
-ssh <BASTION_SSH> "tail -50 $LATEST/<VM_NAME>/virt-launcher-source.log 2>/dev/null"
-ssh <BASTION_SSH> "tail -50 $LATEST/<VM_NAME>/virt-launcher-target.log 2>/dev/null"
+# Component logs: grep for problems first
+ssh <BASTION_SSH> "grep -iE 'error|warn|exception|fail' $LATEST/<VM_NAME>/{forklift-controller,virt-handler-source,virt-handler-target,virt-launcher-source,virt-launcher-target}.log 2>/dev/null"
+# Only if the grep above found something relevant, pull the full context around it:
+# ssh <BASTION_SSH> "tail -50 $LATEST/<VM_NAME>/<the specific log>.log"
 
-# Per-VM pipeline log
+# Per-VM pipeline log (small, structured — fine to tail directly)
 ssh <BASTION_SSH> "tail -30 $LATEST/<VM_NAME>/run.log 2>/dev/null"
 ```
 
@@ -531,6 +603,7 @@ When a test run reveals a new defect (or re-confirms an existing one), create a 
 2. **Include actual pod names and UTC timestamps** from the confirmed run — not placeholders
 3. **Downstream timestamps matter** — record when chaos fired AND when each downstream effect occurred
 4. **Update bug-tracker.md immediately** after creating or updating any bug file
+5. **When updating an existing bug file, don't `cat` the whole thing first.** `grep -n '^#\|^##\|^###'` it to get the section map, then read only the header block (for reproducibility count/date to bump), the most recent `### Iteration N` block (to match its format), and the per-iteration table (to append a row) — a multi-hundred-line bug file usually only needs ~60-80 lines read to update correctly.
 
 ---
 

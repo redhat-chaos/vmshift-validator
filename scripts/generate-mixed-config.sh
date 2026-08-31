@@ -91,7 +91,7 @@ jobs:
     jobIterationDelay: ${DELAY}
     waitWhenFinished: true
     podWait: false
-    maxWaitTimeout: 30m
+    maxWaitTimeout: 1h
     jobPause: 0s
     cleanup: true
     objects:

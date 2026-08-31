@@ -262,7 +262,7 @@ MIGRATION_ARGS := \
 
 .PHONY: help \
 	init-config \
-	check-prereqs check-clusters check-forklift \
+	check-prereqs check-clusters check-forklift check-windows-prereqs \
 	generate-keys setup-kubeconfigs render-config render-mixed-config \
 	density-setup density-status density-teardown \
 	discover-vms migrate-selective migrate-dry-run \
@@ -286,6 +286,7 @@ help: ## Show help
 	@echo "  make check-prereqs              Verify CLI tools, kubeconfigs, SSH key"
 	@echo "  make check-clusters             Test connectivity to both clusters"
 	@echo "  make check-forklift             Verify Forklift/MTV CRDs and mappings"
+	@echo "  make check-windows-prereqs      Verify Windows golden PVC + OOBE secret exist"
 	@echo "  make generate-keys              Generate SSH key pair for VM access"
 	@echo "  make setup-kubeconfigs           Copy kubeconfigs (SOURCE_KC=... TARGET_KC=...)"
 	@echo "  make render-config              Render kube-burner config from template"
@@ -301,10 +302,16 @@ help: ## Show help
 	@echo "  make density-setup FEDORA_VMS=20 FEDORA_HEAVY_VMS=5 WIN_VMS=5"
 	@echo "                                  Three-way mixed workload"
 	@echo "  make density-status             Show VM status on source"
+	@echo "  make density-status COUNT_ONLY=1 OS=windows PHASE=Running"
+	@echo "                                  Count only, filtered by OS/phase"
+	@echo "  make density-status SUMMARY=1   Status counts, overall and by VM name prefix"
 	@echo "  make density-teardown           Remove VMs from both clusters"
+	@echo "  make win-vm-check VM=name       Verify Windows guest workload via guest agent"
 	@echo ""
 	@echo "Phase 2 - Selective migration:"
 	@echo "  make discover-vms               List VMs available for migration"
+	@echo "  make discover-vms COUNT_ONLY=1 NOT_MIGRATED=1 OS=fedora"
+	@echo "                                  Count fedora VMs not yet migrated to target"
 	@echo "  make migrate-selective VMS=vm-a-0,vm-b-0"
 	@echo "  make migrate-selective N=3"
 	@echo "  make migrate-selective SELECTOR=vm-size=large"
@@ -445,6 +452,20 @@ check-forklift: ## Verify Forklift/MTV CRDs and provider mappings
 	@echo ""
 	@echo "Forklift check complete."
 
+check-windows-prereqs: ## Verify Windows golden image PVC + OOBE secret exist on source cluster (before any Windows density-setup)
+	@echo "Checking Windows golden image prerequisites in $(WIN_GOLDEN_NAMESPACE) (source cluster)..."
+	@MISSING=0; \
+	KUBECONFIG=$(SOURCE_KUBECONFIG) kubectl get pvc $(WIN_GOLDEN_PVC) -n $(WIN_GOLDEN_NAMESPACE) >/dev/null 2>&1 && \
+		echo "  OK: golden PVC '$(WIN_GOLDEN_PVC)'" || \
+		{ echo "  MISSING: PVC '$(WIN_GOLDEN_PVC)' in $(WIN_GOLDEN_NAMESPACE)"; MISSING=1; }; \
+	KUBECONFIG=$(SOURCE_KUBECONFIG) kubectl get secret $(WIN_OOBE_SECRET) -n $(WIN_GOLDEN_NAMESPACE) >/dev/null 2>&1 && \
+		echo "  OK: OOBE secret '$(WIN_OOBE_SECRET)'" || \
+		{ echo "  MISSING: secret '$(WIN_OOBE_SECRET)' in $(WIN_GOLDEN_NAMESPACE)"; MISSING=1; }; \
+	if [[ $$MISSING -ne 0 ]]; then \
+		echo "Windows golden image prerequisites missing — see docs/windows-density-troubleshooting.md"; exit 1; \
+	fi; \
+	echo "All Windows prerequisites satisfied."
+
 generate-keys: ## Generate SSH key pair for VM access
 	@mkdir -p $(PROJECT_DIR)/keys
 	@if [[ -f "$(SSH_KEY)" ]]; then \
@@ -508,7 +529,7 @@ render-mixed-config: ## Generate mixed-workload kube-burner config from per-type
 # mirror loop when --win-oobe-secret/--win-golden-namespace are passed.
 _IS_WINDOWS := $(if $(WIN_VMS),1,$(shell echo "$(KUBE_BURNER_CONFIG)" | grep -qi windows && echo 1))
 
-density-setup: $(if $(_HAS_MIX),render-mixed-config) render-config ## Run kube-burner and stabilize workloads
+density-setup: $(if $(_HAS_MIX),render-mixed-config) render-config ## Run kube-burner and stabilize workloads (SKIP_KUBE_BURNER=1 to resume stabilization against already-created VMs)
 	@LOG_LEVEL=$(LOG_LEVEL) GA_READY_TIMEOUT=$(GA_READY_TIMEOUT) GA_READY_INTERVAL=$(GA_READY_INTERVAL) $(SCRIPTS_DIR)/density-setup.sh \
 		--kubeconfig $(SOURCE_KUBECONFIG) \
 		--config $(RENDERED_CONFIG) \
@@ -520,15 +541,20 @@ density-setup: $(if $(_HAS_MIX),render-mixed-config) render-config ## Run kube-b
 		--stabilize-wait $(STABILIZE_WAIT) \
 		--ssh-ready-timeout $(SSH_READY_TIMEOUT) \
 		$(if $(_IS_WINDOWS),--win-oobe-secret $(WIN_OOBE_SECRET) --win-golden-namespace $(WIN_GOLDEN_NAMESPACE),) \
-		$(if $(LOCAL_SSH_OPTS),--local-ssh-opts "$(LOCAL_SSH_OPTS)",)
+		$(if $(LOCAL_SSH_OPTS),--local-ssh-opts "$(LOCAL_SSH_OPTS)",) \
+		$(if $(SKIP_KUBE_BURNER),--skip-kube-burner,)
 
-density-status: ## Show density VM status on source cluster
+density-status: ## Show density VM status on source cluster (COUNT_ONLY=1, OS=fedora|windows, PHASE=Running, SUMMARY=1 for status counts by prefix)
 	@$(SCRIPTS_DIR)/density-status.sh \
 		--kubeconfig $(SOURCE_KUBECONFIG) \
 		--namespace $(NAMESPACE) \
-		--label-selector $(VM_LABEL_SELECTOR)
+		--label-selector $(VM_LABEL_SELECTOR) \
+		$(if $(COUNT_ONLY),--count-only,) \
+		$(if $(OS),--os $(OS),) \
+		$(if $(PHASE),--phase $(PHASE),) \
+		$(if $(SUMMARY),--summary,)
 
-density-teardown: ## Remove density VMs and migration CRs
+density-teardown: ## Remove density VMs and migration CRs (FORCE=1 to nuke stuck namespaces/finalizers)
 	@LOG_LEVEL=$(LOG_LEVEL) $(SCRIPTS_DIR)/density-teardown.sh \
 		--source-kubeconfig $(SOURCE_KUBECONFIG) \
 		--target-kubeconfig $(TARGET_KUBECONFIG) \
@@ -536,17 +562,22 @@ density-teardown: ## Remove density VMs and migration CRs
 		--label-selector $(VM_LABEL_SELECTOR) \
 		--kube-burner-dir $(KUBE_BURNER_DIR) \
 		--config $(KUBE_BURNER_CONFIG) \
-		--mtv-namespace $(MTV_NAMESPACE)
+		--mtv-namespace $(MTV_NAMESPACE) \
+		$(if $(FORCE),--force,)
 
 # ═══════════════════════════════════════════════════════════════
 #  Phase 2 — Migration
 # ═══════════════════════════════════════════════════════════════
 
-discover-vms: ## List VMs available for migration
+discover-vms: ## List VMs available for migration (COUNT_ONLY=1, OS=fedora|windows, PHASE=Running, NOT_MIGRATED=1 to filter)
 	@$(SCRIPTS_DIR)/discover-vms.sh \
 		--kubeconfig $(SOURCE_KUBECONFIG) \
 		--namespace $(NAMESPACE) \
-		--label-selector $(VM_LABEL_SELECTOR)
+		--label-selector $(VM_LABEL_SELECTOR) \
+		$(if $(COUNT_ONLY),--count-only,) \
+		$(if $(OS),--os $(OS),) \
+		$(if $(PHASE),--phase $(PHASE),) \
+		$(if $(NOT_MIGRATED),--not-migrated --target-kubeconfig $(TARGET_KUBECONFIG),)
 
 migrate-selective: ## Migrate selected VMs in parallel (VMS=, N=, or SELECTOR=)
 	@set -e; \
@@ -601,6 +632,27 @@ report: ## Show latest migration summary
 
 list-reports: ## List all report runs
 	@ls -lt $(REPORTS_DIR)/run-* 2>/dev/null || echo "No reports found."
+
+vm-report: ## Show jq-filtered report bundle for a VM (VM=name, TAG=run-tag-prefix optional, defaults to latest run overall)
+ifndef VM
+	$(error Specify VM=vm-name)
+endif
+	@if [[ -n "$(TAG)" ]]; then \
+		LATEST=$$(ls -td $(REPORTS_DIR)/run-$(TAG)-* 2>/dev/null | head -1); \
+	else \
+		LATEST=$$(ls -td $(REPORTS_DIR)/run-* 2>/dev/null | head -1); \
+	fi; \
+	if [[ -z "$$LATEST" ]]; then echo "No matching report dir found (TAG=$(TAG))" >&2; exit 1; fi; \
+	echo "Report dir: $$LATEST"; \
+	echo "=== summary.json ==="; \
+	jq . "$$LATEST/summary.json" 2>/dev/null || echo "(missing)"; \
+	echo "=== migration-metrics ==="; \
+	cat "$$LATEST/$(VM)"/migration-metrics-*.json 2>/dev/null || echo "(missing)"; \
+	echo ""; \
+	echo "=== pre-migration ==="; \
+	cat "$$LATEST/$(VM)"/pre-migration-*.json 2>/dev/null || echo "(missing)"; \
+	echo "=== post-migration (filtered) ==="; \
+	jq '{verdict, vm_info, comparison, cluster}' "$$LATEST/$(VM)"/post-migration-*.json 2>/dev/null || echo "(missing)"
 
 pull-reports: ## Pull reports from remote bastion to local machine
 	@./pull-reports.sh
@@ -686,6 +738,38 @@ endif
 	@echo "=== TARGET ==="
 	@KUBECONFIG=$(TARGET_KUBECONFIG) kubectl get vm,vmi $(VM) -n $(NAMESPACE) 2>/dev/null || echo "Not found"
 
+vm-node: ## Show the node hosting a VM's virt-launcher pod (VM=name, CLUSTER=source|target)
+ifndef VM
+	$(error Specify VM=vm-name)
+endif
+	@if [[ "$(CLUSTER)" == "target" ]]; then KC=$(TARGET_KUBECONFIG); else KC=$(SOURCE_KUBECONFIG); fi; \
+	NODE=$$(KUBECONFIG=$$KC kubectl get pods -n $(NAMESPACE) -l "kubevirt.io/vm=$(VM)" -o jsonpath='{.items[0].spec.nodeName}' 2>/dev/null); \
+	if [[ -z "$$NODE" ]]; then \
+		echo "No virt-launcher pod found for VM=$(VM) on $(if $(filter target,$(CLUSTER)),target,source)" >&2; exit 1; \
+	fi; \
+	echo "$$NODE"
+
+win-vm-check: ## Verify Windows VM guest workload via QEMU guest agent (VM=name, CLUSTER=source|target)
+ifndef VM
+	$(error Specify VM=vm-name)
+endif
+	@if [[ "$(CLUSTER)" == "target" ]]; then KC=$(TARGET_KUBECONFIG); else KC=$(SOURCE_KUBECONFIG); fi; \
+	$(SCRIPTS_DIR)/check-windows-workload.sh --kubeconfig $$KC --namespace $(NAMESPACE) --vm $(VM) --cluster $(if $(filter target,$(CLUSTER)),target,source)
+
+vmim-status: ## Show jq-filtered VMIM status (VM=name to filter, else all VMIMs; CLUSTER=source|target, default source)
+	@if [[ "$(CLUSTER)" == "target" ]]; then KC=$(TARGET_KUBECONFIG); else KC=$(SOURCE_KUBECONFIG); fi; \
+	KUBECONFIG=$$KC kubectl get vmim -n $(NAMESPACE) -o json 2>/dev/null | \
+		jq --arg vm "$(VM)" '.items | map(select($$vm == "" or .spec.vmiName == $$vm)) | map({name: .metadata.name, vmiName: .spec.vmiName, phase: .status.phase, failureReason: .status.migrationState.failureReason, startTimestamp: .status.migrationState.startTimestamp, endTimestamp: .status.migrationState.endTimestamp, sourceNode: .status.migrationState.sourceNode, targetNode: .status.migrationState.targetNode})'
+
+migration-status: ## Show jq-filtered Forklift Migration CR conditions (VM=name). NOTE: Migration.status can show Succeeded even when the underlying VMIM failed -- always cross-check with `make vmim-status` too.
+ifndef VM
+	$(error Specify VM=vm-name)
+endif
+	$(eval FORKLIFT_KC := $(if $(filter target,$(MIGRATION_API)),$(TARGET_KUBECONFIG),$(SOURCE_KUBECONFIG)))
+	@KUBECONFIG=$(FORKLIFT_KC) kubectl get migration "$(VM)-migration" -n $(MTV_NAMESPACE) -o json 2>/dev/null | \
+		jq '{name: .metadata.name, started: .status.started, completed: .status.completed, conditions: .status.conditions, vms: [.status.vms[]? | {name, id, phase, error}]}' || \
+		echo "Migration CR $(VM)-migration not found in $(MTV_NAMESPACE) (checked $(if $(filter target,$(MIGRATION_API)),target,source) cluster, MIGRATION_API=$(MIGRATION_API))" >&2
+
 # ═══════════════════════════════════════════════════════════════
 #  Cleanup
 # ═══════════════════════════════════════════════════════════════
@@ -708,7 +792,7 @@ clean-logs: ## Remove kube-burner logs
 	@rm -f $(KUBE_BURNER_DIR)/.rendered-*.yml
 	@echo "Kube-burner logs and rendered configs cleaned."
 
-clean-all: clean-migrations clean-generated clean-logs density-teardown ## Full cleanup
+clean-all: clean-migrations clean-generated clean-logs density-teardown ## Full cleanup (FORCE=1 to nuke stuck namespaces/finalizers on both clusters in parallel)
 
 # ═══════════════════════════════════════════════════════════════
 #  End-to-end

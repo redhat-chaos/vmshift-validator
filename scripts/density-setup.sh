@@ -28,6 +28,7 @@ SSH_READY_TIMEOUT=600
 LOCAL_SSH_OPTS="-o StrictHostKeyChecking=accept-new"
 WIN_OOBE_SECRET=""
 WIN_GOLDEN_NAMESPACE=""
+SKIP_KUBE_BURNER=0
 
 usage() {
   cat <<EOF
@@ -52,6 +53,10 @@ Optional:
   --win-oobe-secret NAME     Windows OOBE sysprep secret to keep mirrored into
                              NAMESPACE while kube-burner runs (Windows VMs only)
   --win-golden-namespace NS  Namespace to copy the OOBE secret from
+  --skip-kube-burner         Skip kube-burner init and go straight to workload
+                             stabilization against VMs that already exist
+                             (e.g. resuming after kube-burner hit its own
+                             maxWaitTimeout even though VMs finished creating)
 
 EOF
   exit 1
@@ -72,6 +77,7 @@ while [[ $# -gt 0 ]]; do
     --local-ssh-opts)     LOCAL_SSH_OPTS="$2"; shift 2 ;;
     --win-oobe-secret)    WIN_OOBE_SECRET="$2"; shift 2 ;;
     --win-golden-namespace) WIN_GOLDEN_NAMESPACE="$2"; shift 2 ;;
+    --skip-kube-burner)   SKIP_KUBE_BURNER=1; shift ;;
     -h|--help)            usage ;;
     *)                    echo "Unknown option: $1"; usage ;;
   esac
@@ -128,24 +134,28 @@ stop_oobe_mirror() {
   OOBE_MIRROR_PID=""
 }
 
-step.begin "[1/2] RUN KUBE-BURNER"
-task.begin "kube-burner init"
-start_oobe_mirror
-trap 'stop_oobe_mirror' EXIT
-(
-  cd "$KUBE_BURNER_DIR"
-  KUBECONFIG="$KUBECONFIG_PATH" kube-burner init -c "$KUBE_BURNER_CONFIG"
-)
-stop_oobe_mirror
-# Final ensure so the secret survives after the mirror loop stops.
-if [[ -n "$WIN_OOBE_SECRET" && -n "$WIN_GOLDEN_NAMESPACE" ]] \
-   && ! kubectl_source get secret "$WIN_OOBE_SECRET" -n "$NAMESPACE" >/dev/null 2>&1; then
-  kubectl_source get secret "$WIN_OOBE_SECRET" -n "$WIN_GOLDEN_NAMESPACE" -o json 2>/dev/null \
-    | python3 -c "import sys,json; s=json.load(sys.stdin); s['metadata']={'name':s['metadata']['name'],'namespace':'${NAMESPACE}'}; print(json.dumps(s))" 2>/dev/null \
-    | kubectl_source apply -f - >/dev/null 2>&1 || true
+if [[ "$SKIP_KUBE_BURNER" -eq 1 ]]; then
+  log.warn "Skipping kube-burner init (--skip-kube-burner): stabilizing against existing VMs"
+else
+  step.begin "[1/2] RUN KUBE-BURNER"
+  task.begin "kube-burner init"
+  start_oobe_mirror
+  trap 'stop_oobe_mirror' EXIT
+  (
+    cd "$KUBE_BURNER_DIR"
+    KUBECONFIG="$KUBECONFIG_PATH" kube-burner init -c "$KUBE_BURNER_CONFIG"
+  )
+  stop_oobe_mirror
+  # Final ensure so the secret survives after the mirror loop stops.
+  if [[ -n "$WIN_OOBE_SECRET" && -n "$WIN_GOLDEN_NAMESPACE" ]] \
+     && ! kubectl_source get secret "$WIN_OOBE_SECRET" -n "$NAMESPACE" >/dev/null 2>&1; then
+    kubectl_source get secret "$WIN_OOBE_SECRET" -n "$WIN_GOLDEN_NAMESPACE" -o json 2>/dev/null \
+      | python3 -c "import sys,json; s=json.load(sys.stdin); s['metadata']={'name':s['metadata']['name'],'namespace':'${NAMESPACE}'}; print(json.dumps(s))" 2>/dev/null \
+      | kubectl_source apply -f - >/dev/null 2>&1 || true
+  fi
+  task.pass "kube-burner init completed"
+  step.end "PASS"
 fi
-task.pass "kube-burner init completed"
-step.end "PASS"
 
 step.begin "[2/2] STABILIZE WORKLOADS"
 sleep "$STABILIZE_WAIT"
@@ -250,7 +260,12 @@ Write-Output "$lines $rows"
 PIDS=()
 for vm in "${VM_NAMES[@]}"; do
   [[ -z "$vm" ]] && continue
-  stabilize_vm "$vm" &
+  # Each background job gets its own stdout/stderr file instead of sharing
+  # the parent's fd — 20+ concurrent jobs writing to one shared log can
+  # interleave mid-write (bash error/log messages aren't single atomic
+  # writes), producing garbled lines like "WIN: unbound variable" that
+  # look like real bugs but are really two jobs' output spliced together.
+  stabilize_vm "$vm" > "${STAB_RESULTS_DIR}/${vm}.log" 2>&1 &
   PIDS+=($!)
 done
 
@@ -263,8 +278,29 @@ for vm in "${VM_NAMES[@]}"; do
   [[ -z "$vm" ]] && continue
   result_file="${STAB_RESULTS_DIR}/${vm}"
   if [[ ! -f "$result_file" ]]; then
-    task.fail "${vm}" "No result"
-    FAILED=$((FAILED + 1))
+    # The background job died before writing a result (e.g. a transient
+    # unbound-variable/set -e abort). Rather than report a false failure,
+    # do one direct guest-agent/SSH check before giving up — see
+    # ${STAB_RESULTS_DIR}/${vm}.log for why the job died.
+    vm_os=$(detect_vm_os "$vm" "$NAMESPACE" "source")
+    VM_NAME="$vm"; VM_CLUSTER="source"
+    recheck_out=""
+    if is_windows_vm "$vm_os"; then
+      recheck_out=$(run_on_vm_via_agent '
+$lines = 0
+if (Test-Path "C:\data\test\log.txt") { $c = Get-Content "C:\data\test\log.txt"; $lines = if ($c) { @($c).Count } else { 0 } }
+Write-Output "$lines"
+' 2>/dev/null || echo "")
+    else
+      recheck_out=$(run_on_vm "wc -l < /data/test/log.txt 2>/dev/null || echo 0" 2>/dev/null || echo "")
+    fi
+    if [[ -n "$recheck_out" ]] && [[ "${recheck_out//[!0-9]/}" -ge 3 ]] 2>/dev/null; then
+      task.pass "${vm}" "(recovered after retry, lines=${recheck_out})"
+    else
+      log.verbose "$(cat "${STAB_RESULTS_DIR}/${vm}.log" 2>/dev/null || echo "no per-VM log captured")"
+      task.fail "${vm}" "No result"
+      FAILED=$((FAILED + 1))
+    fi
   elif grep -q "^PASS" "$result_file"; then
     task.pass "${vm}" "($(sed 's/^PASS //' "$result_file"))"
   else

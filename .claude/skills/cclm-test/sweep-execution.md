@@ -29,6 +29,8 @@ Use the `chaos-sweep.sh` orchestrator instead of running individual tests:
 
 The sweep runner handles per-iteration: chaos start → migration → chaos cleanup/netem clear → post-checks → result collection → cooldown → next iteration.
 
+**Token note:** don't read each iteration's raw artifacts (logs, JSON, prometheus dumps) into the main conversation as the sweep progresses — that accumulates for the whole sweep and every later turn re-processes it. After each iteration finishes, delegate its data collection to a subagent that applies Phase 7a's extraction rules (jq aggregates, grep-before-tail) and returns only a single condensed verdict row (tag, duration, degradation factor, data-integrity pass/fail, anomalies). Keep a running table of these rows in the main conversation; only the final sweep report synthesis (8d) needs the full-strength model, and it should work from the accumulated rows, not raw per-iteration data.
+
 **YAML iteration file structure:**
 ```yaml
 sweep_name: "<name>"
@@ -74,4 +76,4 @@ Generate a comprehensive sweep report (saved to `cclm-chaos/scenarios/<ID>/repor
 - Customer recommendations with thresholds
 - Metrics reference (what to measure, how to measure, alert thresholds)
 
-Reference example: `cclm-chaos/scenarios/B1/reports/b1-event-driven-sweep-report-20260724.md`
+This structure is already fully specified by the template and `report-guidelines.md` — don't open a full past sweep report as a style reference (they run 300-500+ lines). If a structural question isn't answered by the template/guidelines, check just the section headers of `cclm-chaos/scenarios/B1/reports/b1-event-driven-sweep-report-20260724.md`, not its full body.

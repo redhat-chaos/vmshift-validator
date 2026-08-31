@@ -15,14 +15,15 @@
 
 ## Objective
 
-Determine how a cross-cluster live migration behaves when the target worker node is under severe memory pressure (85% consumed). The target node must allocate memory for the receiver virt-launcher pod, the incoming VM's memory footprint, and any CDI importer pods. Under memory pressure, the kernel OOM killer may evict the receiver pod, the kubelet may refuse to schedule the VMI, or the migration may fail because the target cannot allocate the VM's requested memory.
+Determine how cross-cluster live migrations behave under sustained memory pressure on **all target cluster worker nodes** at scale. Test resilience of 10–20 parallel migrations under 80% and 90% memory consumption on the target side, with **10-minute (600s) chaos duration** to allow complete migration cycles plus measurement overhead. Each target worker node must allocate memory for receiver virt-launcher pods, incoming VM memory footprints, and any co-located CDI importer pods. Under memory pressure, the kernel OOM killer may evict receiver pods, the kubelet may refuse to schedule VMIs, or migrations may fail because the target cannot allocate VM memory. This scenario validates whether Forklift/KubeVirt handles coordinated target-side memory exhaustion and OOM events gracefully at scale.
 
 ## What exactly is tested
 
-- **System under test:** Cross-cluster live migration (MTV/Forklift + KubeVirt) for VM `vm-svc-0` (or representative workload).
-- **Fault:** 85% memory consumption on the target worker node where the VM is being placed, sustained for 300 seconds.
-- **Injection window:** During migration — memory pressure is applied once the VMI appears on the target cluster and its worker node is known.
-- **Out of scope:** Memory pressure on source node; memory pressure on control-plane nodes; testing specific OOM killer behavior for non-migration workloads.
+- **System under test:** Cross-cluster live migration (MTV/Forklift + KubeVirt) for 10–20 VMs migrating in parallel from source to target.
+- **Fault:** Memory hog pods injected on **all target cluster worker nodes** consuming 80% or 90% of node allocatable memory, sustained for **10 minutes (600s minimum)**.
+- **Injection window:** Chaos is started first. Once all target worker nodes reach the target memory utilization, parallel migrations (10 or 20 VMs) are triggered. Migrations run concurrently during the sustained chaos window. Chaos duration (600s) accommodates memory ramp-up (30–60s) + migration execution (2–4 min) + post-migration measurement.
+- **Scale:** Two parallel migration counts (10 VMs, 20 VMs) × two memory pressures (80%, 90%) = four test matrix points.
+- **Out of scope:** Memory pressure on source cluster workers; memory pressure on control-plane nodes; memory over-subscription scenarios (requesting more memory than the node has); behavior with swap enabled.
 
 ## Component map (optional)
 
@@ -50,56 +51,70 @@ Determine how a cross-cluster live migration behaves when the target worker node
 
 | Item | Detail |
 |------|--------|
-| **Target** | Target worker node receiving the VM (resolved dynamically once VMI appears on target) |
-| **Parameters** | `--kubeconfig "$TARGET_KUBECONFIG" --memory-consumption 85% --chaos-duration 300 --node-selector "node-role.kubernetes.io/worker="` |
+| **Scope** | All worker nodes on **target cluster only** |
+| **Parameters** | `krknctl run node-memory-hog --kubeconfig "$TARGET_KUBECONFIG" --memory-consumption <80\|90>% --chaos-duration 300 --node-selector "node-role.kubernetes.io/worker="` |
 | **Krkn scenario** | `node-memory-hog` |
-| **Manual steps** | None — fully automated via `krknctl` |
+| **Trigger** | Once **all target cluster workers** reach target memory %, emit signal for parallel migrations to start |
+| **Manual steps** | None — fully automated via `chaos-trigger.sh` + `make migrate-selective` integration |
 
-## Trigger gate (when to inject)
+## Trigger gate (when to start migrations)
 
-Memory pressure is applied once the **target VMI is scheduled** — i.e. `status.nodeName` is non-empty on the target cluster. As a one-line condition (exit 0 once true):
+Migrations are triggered once **all target cluster worker nodes reach the target memory utilization**. The `chaos-trigger.sh` script:
 
-```bash
-KUBECONFIG="$TARGET_KUBECONFIG" kubectl get vmi "$VM" -n "$NAMESPACE" \
-  -o jsonpath='{.status.nodeName}' | grep -q .
-```
+1. Spawns `krknctl run node-memory-hog` on all target workers with target `%` (80% or 90%)
+2. Polls `kubectl top node` (against `$TARGET_KUBECONFIG`) every 5–10 seconds for all worker nodes
+3. Waits until **all target workers** report ≥ target memory consumed (e.g., actual memory usage is within ±5% of target)
+4. Prints `"CHAOS_READY"` signal to stdout
+5. Parent process (`make migrate-selective`) receives this signal and fans out N parallel migrations (10 or 20 VMs)
+6. Chaos continues running for full duration (≥ 300s) while migrations are in flight
 
-Because `--node-selector` needs a concrete node name at the moment `krknctl run` is invoked, the same lookup is captured into a shell variable immediately before the call — this is the event-driven wait that resolves `$TARGET_NODE` (poll-until-condition, not a fixed sleep). The identical one-liner is then **also** wired into krknctl's native `--trigger-command` on the run itself (see Procedure), gating the fault at the tool level as a durable guard against races.
+This is event-driven, not a fixed sleep, and ensures migrations start under **sustained, measured memory pressure** across all target worker nodes simultaneously.
 
 ## Procedure
 
-### Automated (Krkn / krknctl)
+### Automated (chaos-trigger.sh + krknctl)
 
 ```bash
-# 1. Wait for VMI to appear on target cluster (event-driven poll, not a fixed delay —
-#    needed to resolve the concrete --node-selector value below)
-until TARGET_NODE=$(KUBECONFIG="$TARGET_KUBECONFIG" kubectl get vmi "$VM" -n "$NAMESPACE" \
-    -o jsonpath='{.status.nodeName}' 2>/dev/null) && [[ -n "$TARGET_NODE" ]]; do
+# Run with chaos + scaled migrations
+make migrate-selective \
+  MEMORY_HOG_PERCENT=80 \
+  PARALLEL_MIGRATIONS=10 \
+  N=10
+
+# Or for higher memory pressure + more migrations
+make migrate-selective \
+  MEMORY_HOG_PERCENT=90 \
+  PARALLEL_MIGRATIONS=20 \
+  N=20
+```
+
+**What happens internally (`cclm-chaos/scenarios/C3/chaos-trigger.sh`):**
+
+```bash
+# 1. Spawn krknctl memory hog on all TARGET cluster workers
+krknctl run node-memory-hog \
+  --kubeconfig "$TARGET_KUBECONFIG" \
+  --memory-consumption 80% \
+  --chaos-duration 300 \
+  --node-selector "node-role.kubernetes.io/worker=" &
+TARGET_CHAOS_PID=$!
+
+# 2. Poll all TARGET worker nodes until memory reaches target utilization
+until all_target_workers_reach_memory_target 80; do
   sleep 5
 done
 
-# 2. Run memory stress on target node, also gated natively on the same condition
-krknctl run node-memory-hog \
-  --kubeconfig "$TARGET_KUBECONFIG" \
-  --memory-consumption 85% \
-  --chaos-duration 300 \
-  --node-selector "kubernetes.io/hostname=$TARGET_NODE" \
-  --trigger-command "KUBECONFIG=\"$TARGET_KUBECONFIG\" kubectl get vmi \"$VM\" -n \"$NAMESPACE\" -o jsonpath='{.status.nodeName}' | grep -q ." \
-  --trigger-expected-rc 0 \
-  --triggers-interval 5 \
-  --triggers-timeout 300 \
-  --triggers-on-timeout skip
+# 3. Emit signal — ready for migrations to start
+echo "CHAOS_READY"
+exit 0
 ```
 
-> **Generic form** (targets any worker — useful before VM placement is known):
->
-> ```bash
-> krknctl run node-memory-hog \
->   --kubeconfig "$TARGET_KUBECONFIG" \
->   --memory-consumption 85% \
->   --chaos-duration 300 \
->   --node-selector "node-role.kubernetes.io/worker="
-> ```
+**Parent process integrates this:**
+1. Calls `chaos-trigger.sh` in background, captures PID
+2. Waits for `"CHAOS_READY"` signal from the script
+3. Fans out `N` parallel `migrate-single-vm.sh` calls
+4. Collects per-VM results while chaos is still running (300s window)
+5. Chaos process auto-terminates after duration, cleanup follows
 
 ### Manual (if applicable)
 
@@ -125,22 +140,75 @@ KUBECONFIG="$TARGET_KUBECONFIG" kubectl get pods -n "$NAMESPACE" \
 
 ## Sweep values
 
-Test memory consumption levels across a range to map the degradation and OOM threshold:
+Test memory consumption levels across a range with scaled parallel migrations:
 
-| # | Memory % | Expected Impact |
-|---|----------|-----------------|
-| 1 | 75% | Moderate pressure — migration likely succeeds, pods may be slower |
-| 2 | 85% | High pressure — risk of CDI importer or virt-launcher OOM kills |
-| 3 | 90% | Severe pressure — expect OOM kills of CDI importer pods or target virt-launcher; tests whether Forklift handles target-side OOM gracefully |
+| Memory % | Parallel Migrations | Expected Impact |
+|----------|-------------------|-----------------|
+| 80% | 10 VMs | Moderate-to-high pressure — most migrations succeed, some may be slower |
+| 80% | 20 VMs | High contention — resource competition between 20 receiver pods; measure degradation |
+| 90% | 10 VMs | Severe pressure — expect some OOM kills; tests graceful failure under load |
+| 90% | 20 VMs | Extreme scenario — many OOM kills expected; stress-tests Forklift error handling at scale |
 
-Override the default 85% via `MEMORY_PERCENTAGE=<value>` when running chaos-trigger.sh.
+Override defaults via:
+```bash
+./cclm-chaos/scenarios/C3/chaos-trigger.sh 90 20
+```
+
+## Pre-test Configuration (Important)
+
+The default KubeVirt concurrent migration limit is **5 VMs per cluster**. To test 10–20 parallel migrations, you must patch KubeVirt configuration on **both source and target clusters** before running the scenario.
+
+### Required Patches — Two Locations
+
+**1. Source cluster** — Controls outbound migration concurrency:
+```bash
+kubectl --kubeconfig "$SOURCE_KUBECONFIG" patch kubevirt kubevirt-kubevirt-hyperconverged \
+  -n openshift-cnv --type merge \
+  -p '{"spec":{"configuration":{"migrations":{"parallelMigrationsPerCluster":20,"parallelOutboundMigrationsPerNode":5}}}}'
+```
+
+**2. Target cluster** — Controls inbound migration concurrency (MUST also be patched):
+```bash
+kubectl --kubeconfig "$TARGET_KUBECONFIG" patch kubevirt kubevirt-kubevirt-hyperconverged \
+  -n openshift-cnv --type merge \
+  -p '{"spec":{"configuration":{"migrations":{"parallelMigrationsPerCluster":20,"parallelOutboundMigrationsPerNode":5}}}}'
+```
+
+### Scale Points and Patch Values
+
+| Scale Point | parallelMigrationsPerCluster | parallelOutboundMigrationsPerNode |
+|-------------|-------------------------------|-------------------------------------|
+| 10 VMs | 10 | 3 |
+| 20 VMs | 20 | 5 |
+
+> **Both clusters must be patched.** The source enforces outbound limits and the target enforces inbound limits. Missing either side will throttle migrations below intended concurrency.
+
+### Post-Test Cleanup
+
+**After scenario execution, revert patches back to default (5) on BOTH clusters:**
+
+```bash
+# Source cluster
+kubectl --kubeconfig "$SOURCE_KUBECONFIG" patch kubevirt kubevirt-kubevirt-hyperconverged \
+  -n openshift-cnv --type merge \
+  -p '{"spec":{"configuration":{"migrations":{"parallelMigrationsPerCluster":5,"parallelOutboundMigrationsPerNode":2}}}}'
+
+# Target cluster
+kubectl --kubeconfig "$TARGET_KUBECONFIG" patch kubevirt kubevirt-kubevirt-hyperconverged \
+  -n openshift-cnv --type merge \
+  -p '{"spec":{"configuration":{"migrations":{"parallelMigrationsPerCluster":5,"parallelOutboundMigrationsPerNode":2}}}}'
+```
+
+This restores normal operation and prevents resource exhaustion in standard testing.
 
 ## Notes
 
-- **OOM behavior at 90%+.** At 90%+ memory consumption, expect OOM kills of CDI importer pods or target virt-launcher. This tests whether Forklift handles target-side OOM gracefully — the source VM should remain running and recoverable.
-- **Collateral impact on co-located VMs.** Memory pressure may affect OTHER VMs on the same target node. Ensure isolation or accept collateral impact when interpreting results.
-- **Storage is nfs-csi (RWX, network-accessed).** Since storage is nfs-csi (RWX, network-accessed), memory pressure won't directly affect storage I/O — it primarily impacts pod scheduling and OOM behavior.
-- **Suggestions.** krknctl also exposes KubeVirt-native monitor flags on every scenario: `--kubevirt-namespace`, `--kubevirt-label-selector` / `--kubevirt-name`, `--kubevirt-check-interval`, and `--kubevirt-exit-on-failure` — useful for continuous VM health polling throughout the chaos run, independent of the start-of-fault trigger gate above.
+- **Scaled migrations under pressure.** 10–20 VMs migrating concurrently creates sustained receiver pod pressure on the target cluster. Memory hog starvation + multiple competing receivers stresses Forklift's orchestration and KubeVirt's scheduler.
+- **OOM behavior at 80% vs 90%.** At 80%, migrations may complete with slower convergence. At 90%, expect OOM kills of CDI importer or virt-launcher pods. This tests whether Forklift gracefully handles cascading target-side failures — source VMs should remain running and recoverable.
+- **Chaos duration: 600s (10 minutes) fixed for all test points.** Accommodates memory ramp-up (30–60s), migration execution (2–4 min per scale), post-migration measurement, and ensures chaos overlap across the entire test matrix (10 and 20 VMs use same duration).
+- **Collateral impact on co-located workloads.** Memory pressure affects all pods on target nodes, not just migration receivers. Any other VMs or system pods on the target may be evicted or OOMKilled.
+- **Storage is nfs-csi (RWX, network-accessed).** Memory pressure won't directly affect storage I/O bandwidth — it primarily impacts pod scheduling and OOM behavior.
+- **Monitoring flag suggestions.** krknctl exposes KubeVirt-native monitor flags: `--kubevirt-namespace`, `--kubevirt-label-selector`, `--kubevirt-name`, `--kubevirt-check-interval`, and `--kubevirt-exit-on-failure` — useful for continuous VM health polling during the chaos window.
 
 ## Success criteria
 

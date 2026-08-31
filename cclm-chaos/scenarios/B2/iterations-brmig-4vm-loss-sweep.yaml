@@ -8,7 +8,10 @@
 # isolates packet-loss impact specifically on the migration data plane.
 #
 # Prerequisites:
-#   - VMs running on source cluster (density batch 446e62a5)
+#   - VMs running on source cluster (density batch 50a49e7b as of 2026-08-11 —
+#     original 446e62a5 batch was torn down and recreated mid-session after
+#     NFS storage exhaustion; VM list below updated accordingly, cross-checked
+#     against all other scenarios' reserved VMs)
 #   - Merged/IP-based kubeconfig at /root/krknctl-kc/merged-ip-kubeconfig (auto-created if missing)
 #
 # Usage:
@@ -43,40 +46,47 @@ iterations:
     skip_chaos: true
     interface: br-migration
     vms:
-      - vm-svc-446e62a5-48
-      - vm-svc-446e62a5-49
-      - vm-win-446e62a5-33
-      - vm-win-446e62a5-34
+      - vm-svc-50a49e7b-31
+      - vm-svc-50a49e7b-32
+      - vm-win-50a49e7b-1
+      - vm-win-50a49e7b-10
 
   # --- 5% loss ---
+  # NOTE (2026-08-11 rerun): original VMs (33/34/11/12) migrated but received
+  # ZERO actual packet loss — krknctl's merged-ip-kubeconfig token had expired
+  # (24h TTL), so node-network-chaos failed with 401 Unauthorized before ever
+  # applying netem. Substituted fresh, unreserved VMs after regenerating the
+  # krknctl-kc kubeconfigs.
   - tag: 5pct-4vm
     name: "5% loss | br-migration | 2F+2W"
     loss_percent: 5
     interface: br-migration
     vms:
-      - vm-svc-446e62a5-50
-      - vm-svc-446e62a5-51
-      - vm-win-446e62a5-35
-      - vm-win-446e62a5-36
+      - vm-svc-50a49e7b-60
+      - vm-svc-50a49e7b-61
+      - vm-win-50a49e7b-17
+      - vm-win-50a49e7b-18
 
   # --- 8% loss ---
+  # NOTE (2026-08-11 rerun): same 401/expired-token issue as 5pct — substituted fresh VMs.
   - tag: 8pct-4vm
     name: "8% loss | br-migration | 2F+2W"
     loss_percent: 8
     interface: br-migration
     vms:
-      - vm-svc-446e62a5-52
-      - vm-svc-446e62a5-53
-      - vm-win-446e62a5-37
-      - vm-win-446e62a5-38
+      - vm-svc-50a49e7b-62
+      - vm-svc-50a49e7b-63
+      - vm-win-50a49e7b-19
+      - vm-win-50a49e7b-20
 
   # --- 10% loss ---
+  # NOTE (2026-08-11 rerun): same 401/expired-token issue as 5pct — substituted fresh VMs.
   - tag: 10pct-4vm
     name: "10% loss | br-migration | 2F+2W"
     loss_percent: 10
     interface: br-migration
     vms:
-      - vm-svc-446e62a5-54
-      - vm-svc-446e62a5-55
-      - vm-win-446e62a5-39
-      - vm-win-446e62a5-40
+      - vm-svc-50a49e7b-64
+      - vm-svc-50a49e7b-65
+      - vm-win-50a49e7b-21
+      - vm-win-50a49e7b-22

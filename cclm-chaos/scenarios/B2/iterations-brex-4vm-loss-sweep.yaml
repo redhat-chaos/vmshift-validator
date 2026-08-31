@@ -11,6 +11,10 @@
 #   ./chaos-sweep.sh -f iterations-brex-4vm-loss-sweep.yaml
 #   ./chaos-sweep.sh -f iterations-brex-4vm-loss-sweep.yaml --dry-run
 #   ./chaos-sweep.sh -f iterations-brex-4vm-loss-sweep.yaml --start-from 10pct-4vm
+#
+# NOTE (2026-08-10): vm-svc-446e62a5-40/-41 had already been migrated away by
+# unrelated A7 scenario runs earlier in this session (Stopped on source).
+# Substituted with fresh, unused, unreserved VMs -66/-67 in the 0pct iteration.
 
 sweep_name: "brex-4vm-loss-sweep"
 description: "B2 br-ex packet loss sweep — VMIM-running trigger, 0/5/10/15% loss, 2F+2W per iteration"
@@ -39,8 +43,8 @@ iterations:
     skip_chaos: true
     interface: br-ex
     vms:
-      - vm-svc-446e62a5-40
-      - vm-svc-446e62a5-41
+      - vm-svc-446e62a5-66
+      - vm-svc-446e62a5-67
       - vm-win-446e62a5-25
       - vm-win-446e62a5-26
 

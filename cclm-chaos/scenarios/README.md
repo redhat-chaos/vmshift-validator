@@ -24,7 +24,7 @@ After each execution, add a Jira comment using `cclm-chaos/templates/test-run-re
 | [C1](C1/scenario-spec.md) | CPU stress on source node | Source worker | Direct | node-cpu-hog |
 | [C2](C2/scenario-spec.md) | CPU stress on target node | Target worker | Direct | node-cpu-hog |
 | [C3](C3/scenario-spec.md) | Memory pressure on target | Target | Direct | node-memory-hog |
-| ~~[C4]([skip]-C4/scenario-spec.md)~~ | ~~Disk / IO pressure on target~~ | Target | Partial | **SKIP** — NFS-CSI makes local IO pressure ineffective |
+| [C4](C4/scenario-spec.md) | CPU stress on the CCLM control-plane node (Forklift controller) | Target | Direct | node-cpu-hog |
 | ~~[D1]([skip]-D1/scenario-spec.md)~~ | ~~Detach PVC during import~~ | Target | Manual | **SKIP** — NFS has no VolumeAttachment to detach |
 | ~~[D2]([skip]-D2/scenario-spec.md)~~ | ~~Throttle disk IO on target PVC~~ | Target | Manual | **SKIP** — blkio throttling ineffective on NFS |
 | ~~[D3]([skip]-D3/scenario-spec.md)~~ | ~~Corrupt PVC during import~~ | Target | Manual | **SKIP** — destructive + low signal; CDI lacks checksums |

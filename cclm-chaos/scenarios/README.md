@@ -6,6 +6,50 @@ Optional **`reports/`** subfolder under a scenario holds execution write-ups for
 
 After each execution, add a Jira comment using `cclm-chaos/templates/test-run-result.template.md` and a full report from `test-run-report.template.md` (or link to attachment).
 
+## Scenario index
+
+Quick lookup by ID and title. See [catalog](#catalog) for fault cluster, automation, and Krkn tooling.
+
+| ID | Title |
+|----|-------|
+| [A1](A1/scenario-spec.md) | Kill source virt-launcher |
+| [A2](A2/scenario-spec.md) | Kill target virt-launcher |
+| [A3](A3/scenario-spec.md) | Kill virt-handler (source) |
+| [A4](A4/scenario-spec.md) | Kill virt-handler (target) |
+| [A5](A5/scenario-spec.md) | Kill virt-controller |
+| [A6](A6/scenario-spec.md) | Restart CDI importer |
+| [A7](A7/scenario-spec.md) | Kill Forklift controller |
+| [B1](B1/scenario-spec.md) | Add latency (500 ms) on tunnel |
+| [B2](B2/scenario-spec.md) | Packet loss sweep — multi-interface |
+| [B3](B3/scenario-spec.md) | Network partition (full loss) |
+| [B4](B4/scenario-spec.md) | Block migration port (9185) |
+| [B5](B5/scenario-spec.md) | DNS failure on target |
+| [B6](B6/scenario-spec.md) | Temporary blackout (30 s full loss) |
+| [C1](C1/scenario-spec.md) | Cluster-wide CPU saturation during bulk parallel migration |
+| [C2](C2/scenario-spec.md) | CPU stress on target node |
+| [C3](C3/scenario-spec.md) | Memory pressure on target |
+| [C4](C4/scenario-spec.md) | CPU stress on the CCLM control-plane node (Forklift controller) |
+| [C5](C5/scenario-spec.md) | Memory pressure on the CCLM control-plane node (Forklift controller) |
+| [D4](D4/scenario-spec.md) | Delete DataVolume during migration |
+| [E1](E1/scenario-spec.md) | API slowness on target |
+| [E3](E3/scenario-spec.md) | etcd disruption (single pod kill) |
+| [E6](E6/scenario-spec.md) | CPU stress on target OpenShift control plane (masters) |
+| [E7](E7/scenario-spec.md) | Memory pressure on target OpenShift control plane (masters) |
+| [F1](F1/scenario-spec.md) | Node drain during active VMIM |
+| [G1](G1/scenario-spec.md) | Node power-off (IPMI) during active VMIM |
+| [S1](S1/scenario-spec.md) | Migration at scale (no chaos) |
+| [X1](X1/scenario-spec.md) | Kill source virt-handler then source virt-launcher (sequential) |
+| [X2](X2/scenario-spec.md) | Kill target virt-launcher and source virt-handler simultaneously |
+| [X3](X3/scenario-spec.md) | Kill Forklift controller and target virt-launcher simultaneously |
+| [X4](X4/scenario-spec.md) | Kill Forklift controller and source virt-handler simultaneously |
+| [X5](X5/scenario-spec.md) | Kill source virt-launcher and target virt-launcher simultaneously |
+| [X6](X6/scenario-spec.md) | Network blackout + kill target virt-launcher |
+| [X7](X7/scenario-spec.md) | Kill target virt-handler and target virt-launcher simultaneously |
+
+**Skipped** (spec retained under `[skip]-*` folders): D1 Detach PVC during import · D2 Throttle disk IO on target PVC · D3 Corrupt PVC during import · E2 API unavailable on source during cleanup · E4 Webhook rejects VMIM updates · E5 CRD conflict storm
+
+## Catalog
+
 | ID | Name | Fault cluster | Automation | Krkn / manual |
 |----|------|---------------|------------|---------------|
 | [A1](A1/scenario-spec.md) | Kill source virt-launcher | Source | Direct | pod-scenarios |
@@ -21,10 +65,11 @@ After each execution, add a Jira comment using `cclm-chaos/templates/test-run-re
 | [B4](B4/scenario-spec.md) | Block migration port (9185) | Target (worker) | Direct | node-network-filter |
 | [B5](B5/scenario-spec.md) | DNS failure on target | Target | Direct | pod-scenarios |
 | [B6](B6/scenario-spec.md) | Temporary blackout (30s full loss) | Source | Direct | network-chaos |
-| [C1](C1/scenario-spec.md) | CPU stress on source node | Source worker | Direct | node-cpu-hog |
+| [C1](C1/scenario-spec.md) | Cluster-wide CPU saturation during bulk parallel migration | Source + target workers | Direct | node-cpu-hog |
 | [C2](C2/scenario-spec.md) | CPU stress on target node | Target worker | Direct | node-cpu-hog |
 | [C3](C3/scenario-spec.md) | Memory pressure on target | Target | Direct | node-memory-hog |
 | [C4](C4/scenario-spec.md) | CPU stress on the CCLM control-plane node (Forklift controller) | Target | Direct | node-cpu-hog |
+| [C5](C5/scenario-spec.md) | Memory pressure on the CCLM control-plane node (Forklift controller) | Target | Direct | node-memory-hog |
 | ~~[D1]([skip]-D1/scenario-spec.md)~~ | ~~Detach PVC during import~~ | Target | Manual | **SKIP** — NFS has no VolumeAttachment to detach |
 | ~~[D2]([skip]-D2/scenario-spec.md)~~ | ~~Throttle disk IO on target PVC~~ | Target | Manual | **SKIP** — blkio throttling ineffective on NFS |
 | ~~[D3]([skip]-D3/scenario-spec.md)~~ | ~~Corrupt PVC during import~~ | Target | Manual | **SKIP** — destructive + low signal; CDI lacks checksums |
@@ -34,6 +79,15 @@ After each execution, add a Jira comment using `cclm-chaos/templates/test-run-re
 | [E3](E3/scenario-spec.md) | etcd disruption (single pod kill) | Target | Direct | pod-scenarios |
 | ~~[E4]([skip]-E4/scenario-spec.md)~~ | ~~Webhook rejects VMIM updates~~ | Target | Manual | **SKIP** — complex setup; E3 covers the realistic path |
 | ~~[E5]([skip]-E5/scenario-spec.md)~~ | ~~CRD conflict storm~~ | Target | Manual | **SKIP** — no automation; tests well-understood K8s behavior |
+| [E6](E6/scenario-spec.md) | CPU stress on target OpenShift control plane (masters) | Target masters | Direct | node-cpu-hog |
+| [E7](E7/scenario-spec.md) | Memory pressure on target OpenShift control plane (masters) | Target masters | Direct | node-memory-hog |
 | [F1](F1/scenario-spec.md) | Node drain during active VMIM | Source / Target | Direct | manual (oc adm drain) |
 | [G1](G1/scenario-spec.md) | Node power-off (IPMI) during active VMIM | Source / Target | Direct | manual (ipmitool IPMI) |
 | [S1](S1/scenario-spec.md) | Migration at scale (no chaos) — 5/20/50 VMs | None | Direct | vmshift-validator |
+| [X1](X1/scenario-spec.md) | Kill source virt-handler then source virt-launcher (sequential) | Source | Partial | kubectl + pod-scenarios |
+| [X2](X2/scenario-spec.md) | Kill target virt-launcher and source virt-handler simultaneously | Source + Target | Partial | pod-scenarios |
+| [X3](X3/scenario-spec.md) | Kill Forklift controller and target virt-launcher simultaneously | Target | Partial | pod-scenarios |
+| [X4](X4/scenario-spec.md) | Kill Forklift controller and source virt-handler simultaneously | Target + Source | Partial | pod-scenarios |
+| [X5](X5/scenario-spec.md) | Kill source virt-launcher and target virt-launcher simultaneously | Source + Target | Partial | pod-scenarios |
+| [X6](X6/scenario-spec.md) | Network blackout + kill target virt-launcher | Source + Target | Partial | network-chaos + pod-scenarios |
+| [X7](X7/scenario-spec.md) | Kill target virt-handler and target virt-launcher simultaneously | Target | Partial | pod-scenarios |
